@@ -385,7 +385,9 @@ class Project:
             extra = [playhead] if playhead is not None else []
             s1 = self.snap(start, tolerance, exclude=(cid,), extra=extra)
             s2 = self.snap(start + c["duration"], tolerance, exclude=(cid,), extra=extra) - c["duration"]
-            start = s1 if abs(s1 - start) <= abs(s2 - start) else s2
+            moved = [s for s in (s1, s2) if abs(s - start) > 1e-9]   # only an edge that snapped counts
+            if moved:
+                start = min(moved, key=lambda s: abs(s - start))
         self.data["tracks"][old_track].remove(c)
         c["transition"] = None
         lst = self.data["tracks"][track]
@@ -521,15 +523,11 @@ class Project:
 
     # ------------------------------------------------------------ the music bed (R3-05)
     def duck_points(self, music, level=0.3, ramp=0.4):
-        """Where the music dips: under every clip on the Audio track (speech, voice-over) and every
-        video clip that has its own sound and isn't muted. Returns [(t in the clip, gain)]."""
+        """Where the music dips: under every clip on the Audio track (speech, voice-over).
+        Returns [(t in the clip, gain)]."""
         speech = []
         for x in self.data["tracks"]["audio"]:
             if not x.get("muted"):
-                speech.append((x["start"], end_of(x)))
-        for x in self.data["tracks"]["video"]:
-            m = self.media_by_uri(x["media"]) if x["kind"] == "media" else None
-            if m and m.get("has_audio") and not x.get("muted") and x.get("volume", 1.0) > 0.01:
                 speech.append((x["start"], end_of(x)))
         speech.sort()
         merged = []

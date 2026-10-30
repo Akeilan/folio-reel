@@ -164,7 +164,6 @@ shutil.move(moved, moved + "2")
 pr2 = model.Project.load(os.path.join(moved + "2", "x.reel"))
 check(not pr2.missing_media() and os.path.exists(model.uri_to_path(pr2.media[0]["uri"])),
       "a project moved with its media finds it again")
-check(raises(lambda: model.Project.load(bad)) if False else True, "")
 
 # ---------------------------------------------------------------- rendering (R3-06) and what's in it
 def render(project, name, fmt="mp4", preset="720p"):
@@ -270,7 +269,7 @@ check(out is not None and mkmedia.loudness(out, min(end, mkmedia.media_duration(
       mkmedia.loudness(out, 1.0), "a fade out at the end of the music")
 r.set_keyframes(mb["id"], [(0, 1.0), (2, 1.0), (2.5, 0.1), (3.5, 0.1)])
 g = engine.gain_points(r, r.clip(mb["id"]))
-check(any(close(t, 3.0) and v < 0.2 for t, v in g), "volume points (keyframes)", g)
+check(engine._piecewise(g, 3.0) < 0.2 and engine._piecewise(g, 1.0) > 0.9, "volume points (keyframes)", g)
 
 # the preview
 os.environ.setdefault("FOLIO_REEL_VIDEOSINK", "fakesink")
@@ -282,6 +281,14 @@ for _ in range(50):
     GLib.MainContext.default().iteration(False)
     time.sleep(0.01)
 check(close(pv.position(), 5.0, 0.05), "seeking (frame-accurate)", pv.position())
+snap = pv.snapshot()
+spx = snap.get_pixels() if snap else b"\0\0\0"
+check(snap is not None and spx[2] > 150 and spx[0] < 80, "the preview shows the frame at the playhead", tuple(spx[:3]))
+pv.seek(1.0)
+snap = pv.snapshot()
+spx = snap.get_pixels() if snap else b"\0\0\0"
+check(snap is not None and spx[0] > 150 and spx[2] < 80, "and follows a seek back (the red clip)", tuple(spx[:3]))
+pv.seek(5.0)
 pv.step(1)
 check(close(pv.position(), 5.0 + 1.0 / r.fps, 0.02), "one frame on", pv.position())
 pv.play(2.0)

@@ -70,32 +70,33 @@ def make(d):
 
 
 def frame_color(path, t, w=64, h=36):
-    """Average colour of the decoded frame at t seconds."""
-    uri = Gst.filename_to_uri(path)
-    p = Gst.parse_launch("uridecodebin uri=%s ! videoconvert ! videoscale ! video/x-raw,format=RGB,width=%d,height=%d "
-                         "! appsink name=s" % (uri, w, h))
+    """Average colour of the frame shown at t seconds. Decodes from the start (a seek in some
+    decoders lands on the wrong frame, and the test files are short)."""
+    p = Gst.parse_launch("filesrc location=\"%s\" ! decodebin ! videoconvert ! videoscale "
+                         "! video/x-raw,format=RGB,width=%d,height=%d ! appsink name=s sync=false" % (path, w, h))
     s = p.get_by_name("s")
-    p.set_state(Gst.State.PAUSED)
-    p.get_state(10 * SECOND)
-    p.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE, int(t * SECOND))
-    p.get_state(10 * SECOND)
-    sample = s.emit("pull-preroll")
-    rgb = None
-    if sample is not None:
+    p.set_state(Gst.State.PLAYING)
+    want, best = int(t * SECOND), None
+    while True:
+        sample = s.emit("try-pull-sample", 10 * SECOND)
+        if sample is None:
+            break
         buf = sample.get_buffer()
+        if buf.pts > want and best is not None:
+            break
         ok, mi = buf.map(Gst.MapFlags.READ)
-        data = bytes(mi.data)
+        best = bytes(mi.data)
         buf.unmap(mi)
-        stride = (w * 3 + 3) // 4 * 4
-        tot = [0, 0, 0]
-        for y in range(h):
-            row = data[y * stride:y * stride + w * 3]
-            for x in range(w):
-                for k in range(3):
-                    tot[k] += row[x * 3 + k]
-        rgb = tuple(v // (w * h) for v in tot)
     p.set_state(Gst.State.NULL)
-    return rgb
+    if best is None:
+        return None
+    stride = (w * 3 + 3) // 4 * 4
+    tot = [0, 0, 0]
+    for y in range(h):
+        row = best[y * stride:y * stride + w * 3]
+        for k in range(3):
+            tot[k] += sum(row[k::3])
+    return tuple(v // (w * h) for v in tot)
 
 
 def loudness(path, t, span=0.4):
@@ -103,9 +104,16 @@ def loudness(path, t, span=0.4):
     import array
     import math
     uri = Gst.filename_to_uri(path)
-    p = Gst.parse_launch("uridecodebin uri=%s ! audioconvert ! audio/x-raw,format=S16LE,channels=1,rate=16000 "
-                         "! appsink name=s sync=false" % uri)
+    p = Gst.parse_launch("uridecodebin name=d uri=\"%s\" audioconvert name=c ! audioresample "
+                         "! audio/x-raw,format=S16LE,channels=1,rate=16000 ! appsink name=s sync=false" % uri)
     s = p.get_by_name("s")
+    conv = p.get_by_name("c")
+
+    def pad_added(_d, pad):    # only the sound is wanted; video pads stay unlinked
+        caps = pad.get_current_caps() or pad.query_caps(None)
+        if caps.to_string().startswith("audio/") and not conv.get_static_pad("sink").is_linked():
+            pad.link(conv.get_static_pad("sink"))
+    p.get_by_name("d").connect("pad-added", pad_added)
     p.set_state(Gst.State.PAUSED)
     p.get_state(10 * SECOND)
     p.seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE, Gst.SeekType.SET, int(t * SECOND),
