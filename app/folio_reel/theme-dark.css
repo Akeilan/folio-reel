@@ -133,3 +133,17 @@ headerbar.default-decoration button.titlebutton:hover, .titlebar.default-decorat
 .reel-pane-title, .reel-props label, .reel-timecode { color: #f0f0f0; }
 .reel-transport button:hover { background: #3d3d3d; }
 .reel-timeline { background: #1f1f1f; }
+.reel-props button, .reel-props combobox button, .reel-props spinbutton button { background: #333333; color: #f0f0f0; border-color: #555555; }
+.reel-props button:hover, .reel-props spinbutton button:hover { background: #404040; }
+.reel-props button label, .reel-props combobox button label, .reel-props combobox arrow, .reel-props checkbutton label,
+.reel-props scale value { color: #f0f0f0; }
+.reel-props spinbutton, .reel-props spinbutton entry, .reel-props entry, .reel-props textview, .reel-props textview text {
+  background: #1f1f1f; color: #f0f0f0; border-color: #555555; caret-color: #f0f0f0; }
+.reel-props check, .reel-props checkbutton check { background: #1f1f1f; border-color: #707070; }
+.reel-props check:checked, .reel-props checkbutton check:checked { background: #5b7fc0; border-color: #5b7fc0; }
+.reel-props scale trough { background: #555555; }
+.reel-props scale highlight { background: #5b7fc0; }
+.reel-props scale slider { background: #d0d0d0; border-color: #707070; }
+.reel-props scrollbar, .reel-bin scrollbar, .reel-timeline scrollbar { background: #2b2b2b; border-color: #3d3d3d; }
+.reel-props scrollbar slider, .reel-bin scrollbar slider, .reel-timeline scrollbar slider { background: #707070; }
+.reel-bin button:hover { background: #3d3d3d; }

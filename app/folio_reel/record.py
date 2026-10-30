@@ -108,10 +108,27 @@ def x11_windows():
     out = []
     for w in wins:
         title = prop(w, "_NET_WM_NAME", "text") or prop(w, "WM_NAME", "text")
-        if title:
+        size = window_size(w) if title else None
+        if title and size and size[0] >= 80 and size[1] >= 60:     # not hidden helper windows
             out.append((int(w), title))
     x.XCloseDisplay(dpy)
     return out
+
+
+def window_size(xid):
+    try:
+        import gi
+        gi.require_version("GdkX11", "3.0")
+        from gi.repository import Gdk, GdkX11
+        w = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), int(xid))
+        if w is None:
+            return None
+        if not w.is_viewable() and w.get_state() & Gdk.WindowState.WITHDRAWN:
+            return None
+        g = w.get_geometry()
+        return (g[2], g[3]) if g[2] > 1 and g[3] > 1 else None
+    except Exception:       # noqa: BLE001
+        return None
 
 
 # ------------------------------------------------------------------ Wayland: the screen-cast portal
@@ -203,6 +220,10 @@ class Recorder:
             src = "ximagesrc use-damage=false show-pointer=true"
         elif self.kind == "window":
             src = "ximagesrc use-damage=false show-pointer=true xid=%d" % int(self.xid)
+            size = window_size(self.xid)
+            if size:
+                # H.264 wants even sizes; a window can be any size
+                src += " ! videoconvert ! videoscale ! video/x-raw,width=%d,height=%d" % (size[0] // 2 * 2, size[1] // 2 * 2)
         elif self.kind == "camera":
             src = "videotestsrc is-live=true pattern=ball" if self.device == "test" else \
                 ("v4l2src device=\"%s\"" % self.device if self.device else "v4l2src")
