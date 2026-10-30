@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Folio Reel
+GenericName=Video Editor
+Comment=Edit videos: trim, titles, music, transitions and export
+Exec=folio-reel %F
+Icon=folio-reel
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=application/x-folio-reel;
+Keywords=video;editor;movie;film;timeline;titles;export;mp4;
+StartupWMClass=org.folio.Reel

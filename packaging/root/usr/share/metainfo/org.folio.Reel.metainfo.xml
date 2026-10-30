@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.folio.Reel</id>
+  <name>Folio Reel</name>
+  <summary>Ribbon video editor</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <description>
+    <p>Folio Reel edits video with a ribbon: a media bin, a timeline with titles, video, audio and music
+    tracks, transitions, colour and speed, titles and captions, a music bed that dips under speech,
+    voice-over, screen and camera recording, and MP4 or WebM export. Everything stays on this computer.</p>
+  </description>
+  <launchable type="desktop-id">org.folio.Reel.desktop</launchable>
+  <provides><binary>folio-reel</binary></provides>
+  <releases><release version="0.1.0" date="2026-10-30"/></releases>
+</component>

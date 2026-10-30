@@ -12,3 +12,26 @@
 .reel-props label { color: #262626; }
 .reel-timeline { background: #e6e6e6; }
 .reel-hint { color: #7a7a7a; }
+/* the File page's navigation stays on navy (the backstage's white button rule is for its body) */
+.folio-backstage .folio-bs-nav button.folio-bs-navbtn { background: transparent; background-image: none; border: none; box-shadow: none; }
+.folio-backstage .folio-bs-nav button.folio-bs-navbtn:hover { background: alpha(#ffffff, 0.14); }
+.folio-backstage .folio-bs-nav button.folio-bs-navbtn.active { background: alpha(#000000, 0.25); }
+/* Clip Settings' own controls: not the desktop theme's */
+.reel-props button, .reel-props combobox button, .reel-props spinbutton button {
+  background: #ffffff; background-image: none; color: #262626; border: 1px solid #c8c8c8; box-shadow: none; text-shadow: none; }
+.reel-props button:hover, .reel-props spinbutton button:hover { background: #e8e8e8; }
+.reel-props button label, .reel-props combobox button label, .reel-props combobox arrow { color: #262626; }
+.reel-props spinbutton, .reel-props spinbutton entry, .reel-props entry, .reel-props textview, .reel-props textview text {
+  background: #ffffff; color: #262626; border-color: #c8c8c8; caret-color: #262626; }
+.reel-props check, .reel-props checkbutton check { background: #ffffff; background-image: none; border: 1px solid #8a8a8a; color: #ffffff; box-shadow: none; }
+.reel-props check:checked, .reel-props checkbutton check:checked { background: #1f3a68; border-color: #1f3a68; }
+.reel-props checkbutton label { color: #262626; }
+.reel-props scale value { color: #262626; }
+.reel-props scale trough { background: #c8c8c8; border: none; }
+.reel-props scale highlight { background: #1f3a68; border: none; }
+.reel-props scale slider { background: #ffffff; border: 1px solid #8a8a8a; }
+.reel-props frame border { border-color: #c8c8c8; }
+.reel-props scrollbar, .reel-bin scrollbar, .reel-timeline scrollbar { background: #f3f3f3; background-image: none; border-color: #d6d6d6; }
+.reel-props scrollbar slider, .reel-bin scrollbar slider, .reel-timeline scrollbar slider { background: #a0a0a0; border: none; }
+.reel-bin button { background: transparent; background-image: none; border: none; box-shadow: none; }
+.reel-bin button:hover { background: #e1e1e1; }
