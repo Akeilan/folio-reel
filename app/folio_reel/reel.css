@@ -1,0 +1,14 @@
+/* Folio Reel: the parts of the window the other apps don't have. */
+.reel-bin { background: #f3f3f3; border-right: 1px solid #d6d6d6; }
+.reel-bin iconview { background: #f3f3f3; color: #262626; }
+.reel-bin iconview:selected { background: #d7e0f0; color: #1a1a1a; }
+.reel-pane-title { font-weight: bold; color: #262626; padding: 6px 8px 2px 8px; }
+.reel-preview { background: #000000; }
+.reel-transport { background: #f3f3f3; border-top: 1px solid #d6d6d6; padding: 2px 6px; }
+.reel-transport button { background: transparent; border: none; box-shadow: none; border-radius: 2px; min-height: 26px; min-width: 28px; }
+.reel-transport button:hover { background: #e1e1e1; }
+.reel-timecode { font-family: "DejaVu Sans Mono", monospace; font-size: 10pt; color: #262626; padding: 0 8px; }
+.reel-props { background: #f3f3f3; border-left: 1px solid #d6d6d6; }
+.reel-props label { color: #262626; }
+.reel-timeline { background: #e6e6e6; }
+.reel-hint { color: #7a7a7a; }

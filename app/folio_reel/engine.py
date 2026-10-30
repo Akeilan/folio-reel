@@ -350,8 +350,18 @@ def _add(project, layer, track, c, width, height, ex):
     clip.set_child_property("text", c.get("text", ""))
     clip.set_child_property("font-desc", c.get("font", "Sans Bold 48"))
     clip.set_child_property("color", argb(c.get("text_color", "#ffffffff")))
-    bg = argb(c.get("bg_color", "#ff000000"))
-    clip.set_child_property("foreground-color", bg)
+    bgs = c.get("bg_color", "#ff000000").lstrip("#")
+    bg_alpha = int(bgs[:2], 16) if len(bgs) == 8 else 255
+    if bg_alpha >= 255:
+        # a title card: the colour fills the frame
+        clip.set_child_property("foreground-color", argb("#" + bgs))
+    else:
+        # lower thirds and captions: the picture shows through; a shaded box sits behind the words
+        clip.set_child_property("foreground-color", argb("#00000000"))
+        try:
+            clip.set_child_property("shaded-background", bg_alpha > 0)
+        except Exception:       # noqa: BLE001
+            pass
     try:
         clip.set_child_property("pattern", 17)       # videotestsrc solid-color: the background
     except Exception:       # noqa: BLE001
@@ -382,18 +392,26 @@ class Preview:
         self.sink = Gst.ElementFactory.make(sink_name) or Gst.ElementFactory.make("gtksink")
         self.widget = None
         if self.sink is not None:
+            if self.sink.find_property("sync"):
+                self.sink.set_property("sync", True)
             self.pipeline.preview_set_video_sink(self.sink)
             if self.sink.find_property("widget"):
                 self.widget = self.sink.get_property("widget")
         a = os.environ.get("FOLIO_REEL_AUDIOSINK")
         if a:
-            self.pipeline.preview_set_audio_sink(Gst.ElementFactory.make(a))
+            asink = Gst.ElementFactory.make(a)
+            if asink.find_property("sync"):
+                asink.set_property("sync", True)      # a stand-in sink still plays in real time
+            self.pipeline.preview_set_audio_sink(asink)
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._message)
         self.rate = 1.0
         self._pos = 0.0
         self.state = "paused"
+        # loading media runs the main loop for a moment: a seek that comes in then waits for the rebuild
+        self.building = False
+        self._pending_seek = None
         self._size = (project.width, project.height)
         self.refresh()
         self.pipeline.set_state(Gst.State.PAUSED)
@@ -409,6 +427,18 @@ class Preview:
 
     def refresh(self):
         """The project changed: rebuild the timeline in place and stay where we were."""
+        if self.building:
+            return
+        self.building = True
+        try:
+            self._refresh()
+        finally:
+            self.building = False
+        if self._pending_seek is not None:
+            target, self._pending_seek = self._pending_seek, None
+            self.seek(*target)
+
+    def _refresh(self):
         pos = self.position()
         if (self.project.width, self.project.height) != self._size:
             self._size = (self.project.width, self.project.height)
@@ -417,10 +447,20 @@ class Preview:
                     t.set_restriction_caps(Gst.Caps.from_string(
                         "video/x-raw,width=%d,height=%d,framerate=%d/1" % (self.project.width, self.project.height,
                                                                            int(self.project.fps))))
+        # The old clips are freed by the rebuild: the pipeline stops first (READY) so no streaming
+        # thread is still using them, then prerolls the new timeline.
+        if self.state == "playing":
+            self.pause()
+        self.pipeline.set_state(Gst.State.READY)
+        self.pipeline.get_state(5 * SECOND)
         build(self.project, self.timeline)
-        self.timeline.commit_sync()
-        if pos:
-            self.seek(min(pos, max(0.0, self.duration())))
+        self.timeline.commit()
+        self.pipeline.set_state(Gst.State.PAUSED)
+        # not a blocking wait: GTK's video sink shows frames through the main loop
+        self._wait_ready()
+        self.building = False
+        self.seek(min(pos, max(0.0, self.duration())))
+        self.building = True
 
     def duration(self):
         return self.timeline.get_duration() / SECOND
@@ -438,9 +478,29 @@ class Preview:
             self._pos = p / SECOND
         return self._pos
 
+    def _wait_ready(self, timeout=3.0, async_done=False):
+        """Wait for the pipeline to settle (or a seek to finish) while letting the main loop run:
+        GTK's video sink hands each frame to the main thread, so blocking it would deadlock."""
+        ctx = GLib.MainContext.default()
+        bus = self.pipeline.get_bus()
+        end = GLib.get_monotonic_time() + int(timeout * 1e6)
+        while GLib.get_monotonic_time() < end:
+            if async_done:
+                if bus.pop_filtered(Gst.MessageType.ASYNC_DONE) is not None:
+                    return True
+            elif self.pipeline.get_state(0)[0] != Gst.StateChangeReturn.ASYNC:
+                return True
+            if not ctx.iteration(False):
+                GLib.usleep(2000)
+        return False
+
     def seek(self, secs, accurate=True):
+        if self.building:
+            self._pending_seek = (secs, accurate)
+            self._pos = secs
+            return
         secs = max(0.0, min(secs, self.duration()))
-        self.pipeline.get_state(2 * SECOND)            # a seek before the pipeline is ready is lost
+        self._wait_ready()                              # a seek before the pipeline is ready is lost
         flags = Gst.SeekFlags.FLUSH | (Gst.SeekFlags.ACCURATE if accurate else Gst.SeekFlags.KEY_UNIT)
         bus = self.pipeline.get_bus()
         while bus.pop_filtered(Gst.MessageType.ASYNC_DONE) is not None:    # old ones from earlier seeks
@@ -451,7 +511,7 @@ class Preview:
             self.pipeline.seek_simple(Gst.Format.TIME, flags, ns(secs))
         if self.state != "playing":
             # paused: wait for the new frame to be ready, so the picture and a snapshot match the playhead
-            bus.timed_pop_filtered(2 * SECOND, Gst.MessageType.ASYNC_DONE)
+            self._wait_ready(async_done=True)
         self._pos = secs
         self.on_event("position", secs)
 
@@ -465,7 +525,7 @@ class Preview:
             self.seek(0)
         self.pipeline.set_state(Gst.State.PLAYING)
         if abs(rate - 1.0) > 1e-6:
-            self.pipeline.get_state(2 * SECOND)
+            self._wait_ready()
             self.pipeline.seek(rate, Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
                                Gst.SeekType.SET, ns(self.position()), Gst.SeekType.NONE, -1)
         self.state = "playing"
@@ -476,7 +536,7 @@ class Preview:
         self.pipeline.set_state(Gst.State.PAUSED)
         if abs(self.rate - 1.0) > 1e-6:
             self.rate = 1.0
-            self.pipeline.get_state(2 * SECOND)
+            self._wait_ready()
             self.pipeline.seek(1.0, Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
                                Gst.SeekType.SET, ns(self.position()), Gst.SeekType.NONE, -1)
         self.state = "paused"
@@ -596,6 +656,7 @@ class Exporter:
         self._timer = None
         self.done = False
         self.error = None
+        self.fraction = 0.0
 
     @staticmethod
     def _element_added(_bin, _sub, el):
@@ -615,7 +676,8 @@ class Exporter:
             return False
         ok, p = self.pipeline.query_position(Gst.Format.TIME)
         if ok and self.duration:
-            self.on_progress(max(0.0, min(1.0, p / self.duration)))
+            self.fraction = max(0.0, min(1.0, p / self.duration))
+            self.on_progress(self.fraction)
         return True
 
     def _finish(self, error=None):
@@ -632,7 +694,8 @@ class Exporter:
                 os.remove(self.path)
             except OSError:
                 pass
-        self.on_progress(1.0 if not error else 0.0)
+        self.fraction = 1.0 if not error else 0.0
+        self.on_progress(self.fraction)
         self.on_done(None if error else self.path, error)
 
     def _message(self, bus, msg):
