@@ -13,6 +13,7 @@ order and record undo steps.
 import copy
 import json
 import os
+import time
 
 TRACKS = ["titles", "video", "audio", "music"]
 TRACK_NAMES = {"titles": "Titles", "video": "Video", "audio": "Audio", "music": "Music"}
@@ -66,8 +67,15 @@ class Project:
         for fn in list(self.listeners):
             fn(what)
 
-    def checkpoint(self, label=""):
-        """Before an edit: remember how things were, for Undo."""
+    def checkpoint(self, label="", merge=None):
+        """Before an edit: remember how things were, for Undo. merge: a key; another change with the
+        same key straight after (a slider being dragged) joins this undo step."""
+        now = time.monotonic()
+        last = getattr(self, "_merge", None)
+        self._merge = (merge, now) if merge is not None else None
+        if merge is not None and last and last[0] == merge and now - last[1] < 1.5 and self.undo_stack:
+            self.redo_stack.clear()
+            return
         self.undo_stack.append((label, copy.deepcopy(self.data)))
         if len(self.undo_stack) > 200:
             self.undo_stack.pop(0)
@@ -79,7 +87,14 @@ class Project:
     def can_redo(self):
         return bool(self.redo_stack)
 
+    def undo_label(self):
+        return self.undo_stack[-1][0] if self.undo_stack else None
+
+    def redo_label(self):
+        return self.redo_stack[-1][0] if self.redo_stack else None
+
     def undo(self):
+        self._merge = None
         if not self.undo_stack:
             return None
         label, data = self.undo_stack.pop()
@@ -89,6 +104,7 @@ class Project:
         return label
 
     def redo(self):
+        self._merge = None
         if not self.redo_stack:
             return None
         label, data = self.redo_stack.pop()
@@ -274,12 +290,13 @@ class Project:
         at=None: after the last clip on the track. insert=True: clips from `at` on move later."""
         if track not in TRACKS:
             raise EditError("there's no %s track" % track)
-        self.checkpoint("Add Clip")
         if isinstance(source, dict):
             if track == "titles" and not (source.get("has_video") or source.get("is_image")):
                 raise EditError("The Titles track is for pictures, video and titles.")
             if track in ("audio", "music") and not source.get("has_audio"):
                 raise EditError("“%s” has no sound to put on the %s track." % (source["name"], TRACK_NAMES[track]))
+        self.checkpoint("Add Clip")
+        if isinstance(source, dict):
             c = self._media_clip(source)
         else:
             c = self._text_clip(source, text or {"title": "Title", "lower-third": "Name\nRole",
@@ -406,6 +423,29 @@ class Project:
         self._changed()
         return c
 
+    def paste(self, items, at):
+        """Copied clips back on their tracks from time `at`, keeping their spacing; each goes to
+        the first free place. items: [{"track", "clip", "offset", "media"}]. Returns the new clips."""
+        if not items:
+            return []
+        self.checkpoint("Paste")
+        out = []
+        for it in sorted(items, key=lambda x: x["offset"]):
+            c = copy.deepcopy(it["clip"])
+            if c["kind"] == "media" and self.media_by_uri(c["media"]) is None:
+                if not it.get("media"):
+                    continue
+                self.data["media"].append(copy.deepcopy(it["media"]))
+            c["id"] = self._new_id()
+            c["transition"] = None
+            track = it["track"]
+            c["start"] = self._first_free(track, max(0.0, at + it["offset"]), c["duration"])
+            self.data["tracks"][track].append(c)
+            self._sort(track)
+            out.append(c)
+        self._changed("all" if any(it.get("media") for it in items) else "timeline")
+        return out
+
     def trim(self, cid, edge, t, tolerance=0.0, playhead=None):
         """Drag a clip's start or end edge to time t (R3-01 trim). The media's own length and the
         neighbouring clips are the limits."""
@@ -442,12 +482,13 @@ class Project:
         """Ribbon Trim Start / Trim End: the clip's start (or end) moves to the playhead."""
         return self.trim(cid, edge, t)
 
-    def set(self, cid, label="Change", **props):
-        """Change clip properties (volume, fade_in, color, text, ...)."""
+    def set(self, cid, label="Change", merge=False, **props):
+        """Change clip properties (volume, fade_in, color, text, ...). merge=True: repeated changes
+        of the same properties (a slider) are one undo step."""
         track, c = self.find(cid)
         if c is None:
             raise EditError("no such clip")
-        self.checkpoint(label)
+        self.checkpoint(label, merge=(cid, tuple(sorted(props))) if merge else None)
         for k, v in props.items():
             if isinstance(v, dict) and isinstance(c.get(k), dict):
                 c[k] = dict(c[k], **v)
