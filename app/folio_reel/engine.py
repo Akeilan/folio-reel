@@ -16,7 +16,7 @@ gi.require_version("GES", "1.0")
 gi.require_version("GstPbutils", "1.0")
 gi.require_version("GstController", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import GdkPixbuf, GES, GLib, Gst, GstController, GstPbutils  # noqa: E402
+from gi.repository import GdkPixbuf, GES, GLib, GObject, Gst, GstController, GstPbutils  # noqa: E402
 
 from . import model  # noqa: E402
 
@@ -131,7 +131,7 @@ def argb(hexstr):
     h = hexstr.lstrip("#")
     if len(h) == 6:
         h = "ff" + h
-    return int(h, 16) & 0xFFFFFFFF
+    return GObject.Value(GObject.TYPE_UINT, int(h, 16) & 0xFFFFFFFF)   # a plain int overflows gint
 
 
 def make_timeline(width, height, fps):
@@ -170,15 +170,16 @@ def _piecewise(points, t):
     return points[-1][1]
 
 
-def gain_points(project, c):
-    """The clip's loudness through time: its volume × volume points × fades × the music-bed dip.
-    [(seconds into the clip, gain)]."""
+def gain_points(project, c, cross_in=0.0, cross_out=0.0):
+    """The clip's loudness through time: its volume × volume points × fades (and crossfades) × the
+    music-bed dip. [(seconds into the clip, gain)]."""
     d = c["duration"]
     fade = []
-    if c.get("fade_in", 0) > 0:
-        fade += [(0.0, 0.0), (c["fade_in"], 1.0)]
-    if c.get("fade_out", 0) > 0:
-        fade += [(d - c["fade_out"], 1.0), (d, 0.0)]
+    fi, fo = max(c.get("fade_in", 0), cross_in), max(c.get("fade_out", 0), cross_out)
+    if fi > 0:
+        fade += [(0.0, 0.0), (min(fi, d), 1.0)]
+    if fo > 0:
+        fade += [(max(0.0, d - fo), 1.0), (d, 0.0)]
     fade.sort()
     kf = [tuple(p) for p in c.get("keyframes", [])]
     duck = project.duck_points(c) if c.get("music_bed") else []
@@ -253,26 +254,43 @@ def build(project, tl, width=None, height=None):
     height = height or project.height
     for layer in list(tl.get_layers()):
         tl.remove_layer(layer)
+    # Picture tracks get two layers. A crossfade puts the second clip on the other layer and fades
+    # the upper one's opacity across the overlap: an even mix all the way (GES's own crossfade dips
+    # the outgoing picture). Wipes stay on one layer, where GES draws them where clips overlap.
     layers = {}
-    for name in model.TRACKS:
-        layer = tl.append_layer()
-        layer.set_auto_transition(name in ("video", "titles"))
-        layers[name] = layer
+    for name in model.TRACKS:          # first track = top layer
+        layers[name] = [tl.append_layer() for _ in range(2 if name in ("video", "titles") else 1)]
+        for layer in layers[name]:
+            layer.set_auto_transition(name in ("video", "titles"))
     made = {}
     for name in model.TRACKS:
         clips = project.track(name)
-        dips = {}
-        for i, c in enumerate(clips):
-            tr = c.get("transition")
-            if tr and tr["type"] == "dip-black" and i > 0:
-                dips.setdefault(c["id"], [0, 0])[0] = tr["duration"] / 2
-                dips.setdefault(clips[i - 1]["id"], [0, 0])[1] = tr["duration"] / 2
+        extra, slot, prev = {}, {}, None
         for c in clips:
-            g = _add(project, layers[name], name, c, width, height, dips.get(c["id"], (0, 0)))
+            e = extra.setdefault(c["id"], {"alpha_in": 0.0, "alpha_out": 0.0, "gain_in": 0.0, "gain_out": 0.0})
+            s = slot[prev["id"]] if prev else 0
+            tr = c.get("transition")
+            if tr and prev is not None and name in ("video", "titles"):
+                d, pe = tr["duration"], extra[prev["id"]]
+                if tr["type"] == "dip-black":
+                    e["alpha_in"] = max(e["alpha_in"], d / 2)
+                    pe["alpha_out"] = max(pe["alpha_out"], d / 2)
+                elif tr["type"] == "crossfade":
+                    s = 1 - s
+                    if s == 0:
+                        e["alpha_in"] = d          # on top: fades in over the clip before
+                    else:
+                        pe["alpha_out"] = d        # the clip before is on top: it fades out
+                    e["gain_in"], pe["gain_out"] = d, d
+            slot[c["id"]] = s
+            prev = c
+        for c in clips:
+            layer = layers[name][slot[c["id"]]]
+            g = _add(project, layer, name, c, width, height, extra[c["id"]])
             if g is not None:
                 made[c["id"]] = g
         # wipes and the like: the transition GES made where two clips overlap
-        trans = [x for x in layers[name].get_clips() if isinstance(x, GES.TransitionClip)]
+        trans = [x for lay in layers[name] for x in lay.get_clips() if isinstance(x, GES.TransitionClip)]
         for c in clips:
             tr = c.get("transition")
             if not tr or tr["type"] in ("dip-black", "crossfade"):
@@ -289,7 +307,7 @@ def build(project, tl, width=None, height=None):
     return made
 
 
-def _add(project, layer, track, c, width, height, dip):
+def _add(project, layer, track, c, width, height, ex):
     if c["kind"] == "media":
         media = project.media_by_uri(c["media"])
         if media is None or not os.path.exists(model.uri_to_path(c["media"]) or ""):
@@ -313,14 +331,14 @@ def _add(project, layer, track, c, width, height, dip):
             _effects(project, c, clip, media)
         inp = 0 if media.get("is_image") else ns(c["inpoint"])
         for vs in _children(clip, GES.VideoSource):
-            ap = alpha_points(c, dip[0], dip[1])
+            ap = alpha_points(c, ex["alpha_in"], ex["alpha_out"])
             if ap:
                 _control(vs, "alpha", [(inp + ns(t * sp), v) for t, v in ap], absolute=False)
             _place(project, c, vs, width, height)
         for au in _children(clip, GES.AudioSource):
             if c.get("muted"):
                 au.set_child_property("mute", True)
-            pts = gain_points(project, c)
+            pts = gain_points(project, c, ex["gain_in"], ex["gain_out"])
             if len(pts) > 1 and any(abs(v - 1.0) > 1e-6 for _t, v in pts):
                 _control(au, "volume", [(inp + ns(t * sp), v) for t, v in pts])
         return clip
@@ -342,7 +360,7 @@ def _add(project, layer, track, c, width, height, dip):
     clip.set_child_property("valignment", getattr(GES.TextVAlign, VALIGN.get(c.get("valign", "center"), "CENTER")))
     clip.set_child_property("draw-shadow", c["kind"] != "title")
     for vs in _children(clip, GES.VideoSource):
-        ap = alpha_points(c, dip[0], dip[1])
+        ap = alpha_points(c, ex["alpha_in"], ex["alpha_out"])
         if ap:
             _control(vs, "alpha", [(ns(t), v) for t, v in ap], absolute=False)
     return clip
@@ -374,6 +392,7 @@ class Preview:
         bus.add_signal_watch()
         bus.connect("message", self._message)
         self.rate = 1.0
+        self._pos = 0.0
         self.state = "paused"
         self._size = (project.width, project.height)
         self.refresh()
@@ -407,19 +426,33 @@ class Preview:
         return self.timeline.get_duration() / SECOND
 
     def position(self):
+        """The playhead. While paused it is where we last put it (GES answers a position query late
+        after a seek); while playing it is what the pipeline says."""
+        if self.state != "playing":
+            return self._pos
         try:
             ok, p = self.pipeline.query_position(Gst.Format.TIME)
         except Exception:       # noqa: BLE001
             return 0.0
-        return p / SECOND if ok and p >= 0 else 0.0
+        if ok and p >= 0:
+            self._pos = p / SECOND
+        return self._pos
 
     def seek(self, secs, accurate=True):
         secs = max(0.0, min(secs, self.duration()))
+        self.pipeline.get_state(2 * SECOND)            # a seek before the pipeline is ready is lost
         flags = Gst.SeekFlags.FLUSH | (Gst.SeekFlags.ACCURATE if accurate else Gst.SeekFlags.KEY_UNIT)
+        bus = self.pipeline.get_bus()
+        while bus.pop_filtered(Gst.MessageType.ASYNC_DONE) is not None:    # old ones from earlier seeks
+            pass
         if abs(self.rate - 1.0) > 1e-6 and self.state == "playing":
             self.pipeline.seek(self.rate, Gst.Format.TIME, flags, Gst.SeekType.SET, ns(secs), Gst.SeekType.NONE, -1)
         else:
             self.pipeline.seek_simple(Gst.Format.TIME, flags, ns(secs))
+        if self.state != "playing":
+            # paused: wait for the new frame to be ready, so the picture and a snapshot match the playhead
+            bus.timed_pop_filtered(2 * SECOND, Gst.MessageType.ASYNC_DONE)
+        self._pos = secs
         self.on_event("position", secs)
 
     def step(self, frames):
@@ -439,6 +472,7 @@ class Preview:
         self.on_event("state", "playing")
 
     def pause(self):
+        self.position()                                 # remember where playing got to
         self.pipeline.set_state(Gst.State.PAUSED)
         if abs(self.rate - 1.0) > 1e-6:
             self.rate = 1.0
@@ -504,11 +538,7 @@ def encoding_profile(fmt, width, height, fps):
     ap = GstPbutils.EncodingAudioProfile.new(Gst.Caps.from_string(acaps), None, raw_a, 0)
     try:
         # quicker encoders: rendering a long film shouldn't take all afternoon
-        if vcaps == "video/x-h264" and _pick("x264enc"):
-            vp.set_preset_name("x264enc")
-            vp.set_element_properties(Gst.Structure.from_string(
-                "element-properties-map, map={[x264enc, speed-preset=(string)faster, tune=(string)zerolatency]}")[0])
-        elif vcaps == "video/x-vp9":
+        if vcaps == "video/x-vp9":
             vp.set_element_properties(Gst.Structure.from_string(
                 "element-properties-map, map={[vp9enc, deadline=(int64)1, cpu-used=(int)8]}")[0])
     except Exception:       # noqa: BLE001 — older GStreamer: default settings
@@ -559,12 +589,20 @@ class Exporter:
         if not self.pipeline.set_render_settings(model.path_to_uri(path), prof):
             raise model.EditError("This computer can't make %s files." % FORMATS.get(fmt, fmt))
         self.pipeline.set_mode(GES.PipelineFlags.RENDER)
+        self.pipeline.connect("deep-element-added", self._element_added)
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         self._bus_id = bus.connect("message", self._message)
         self._timer = None
         self.done = False
         self.error = None
+
+    @staticmethod
+    def _element_added(_bin, _sub, el):
+        # a quicker H.264 preset: rendering a long film shouldn't take all afternoon
+        f = el.get_factory()
+        if f is not None and f.get_name() == "x264enc":
+            Gst.util_set_object_arg(el, "speed-preset", "faster")
 
     def start(self):
         if self.duration <= 0:
