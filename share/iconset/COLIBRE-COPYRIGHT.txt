@@ -1,0 +1,5 @@
+Ribbon icons: the Colibre icon theme from LibreOffice 24.2
+(https://www.libreoffice.org), used under the Mozilla Public License 2.0;
+Colibre artwork is also available under CC BY-SA 4.0.
+Folio Writer recolours these icons when it loads them.
+Source: http://download.documentfoundation.org/libreoffice/src
