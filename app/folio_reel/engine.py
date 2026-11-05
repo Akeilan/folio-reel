@@ -520,15 +520,24 @@ class Preview:
         self.seek(self.position() + frames / float(self.project.fps))
 
     def play(self, rate=1.0):
-        self.rate = rate
         if self.position() >= self.duration() - 0.05:
             self.seek(0)
-        self.pipeline.set_state(Gst.State.PLAYING)
+        at = self.position()
+        self.rate = rate
         if abs(rate - 1.0) > 1e-6:
-            self._wait_ready()
+            # Set the speed while still paused. Going to PLAYING first would play at normal speed
+            # until the seek landed, and the wait for it lets the main loop in: an event arriving
+            # then (the end of the project, a key) would find the window half started.
+            self._wait_ready()                          # a seek before the pipeline is ready is lost
+            bus = self.pipeline.get_bus()
+            while bus.pop_filtered(Gst.MessageType.ASYNC_DONE) is not None:
+                pass
             self.pipeline.seek(rate, Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
-                               Gst.SeekType.SET, ns(self.position()), Gst.SeekType.NONE, -1)
+                               Gst.SeekType.SET, ns(at), Gst.SeekType.NONE, -1)
+            self._wait_ready(async_done=True)
+            self._pos = at
         self.state = "playing"
+        self.pipeline.set_state(Gst.State.PLAYING)
         self.on_event("state", "playing")
 
     def pause(self):

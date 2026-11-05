@@ -337,6 +337,9 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.preview.seek(0.0)
             self.playhead = 0.0
         self.preview.play(rate)
+        if self.preview.state != "playing":     # it reached the end while starting
+            self._show_play_state()
+            return
         self.playing = True
         self._show_play_state()
         if self._tick_id is None:
@@ -375,10 +378,10 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.pause()
             return
         if key == "l":
-            self.shuttle = 1 if self.shuttle <= 0 else min(8, self.shuttle * 2)
-            self.play(float(self.shuttle))
-            s = self.shuttle
-            self.shuttle = s
+            s = 1 if self.shuttle <= 0 else min(8, self.shuttle * 2)
+            self.play(float(s))
+            if self.playing:                # play() runs the main loop: it can stop at the end
+                self.shuttle = s
             return
         # J: play backwards by stepping the playhead back (smooth reverse needs every frame decoded)
         s = -1 if self.shuttle >= 0 else max(-8, self.shuttle * 2)
