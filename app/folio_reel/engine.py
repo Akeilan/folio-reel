@@ -111,6 +111,97 @@ def thumbnail(info, t=None, width=160):
 _assets = {}
 
 
+# ------------------------------------------------------------------ waveforms (R4-01)
+WAVE_RATE = 25          # peaks a second: enough to cut on, cheap to read
+WAVE_MAX = 30000        # and a ceiling, so an hour-long file still reads quickly
+
+_waves = {}             # uri: [peak 0..1] for the whole media, or "reading"
+
+
+def wave_points(duration):
+    """How many peaks a media of this length gets."""
+    return max(1, min(WAVE_MAX, int(round(max(0.1, duration) * WAVE_RATE))))
+
+
+def waveform(info):
+    """The loudest sample in each slice of the media's sound, 0..1. Decodes the whole file, so
+    this belongs off the main loop; waveform_async does that."""
+    init()
+    n = wave_points(info.get("duration") or 0)
+    rate = 8000
+    pipe = Gst.parse_launch(
+        "uridecodebin uri=%s ! audioconvert ! audioresample ! "
+        "audio/x-raw,format=S16LE,channels=1,rate=%d,layout=interleaved ! appsink name=sink sync=false max-buffers=64"
+        % (info["uri"], rate))
+    sink = pipe.get_by_name("sink")
+    peaks = [0.0] * n
+    per = max(1, int(round(rate * (info.get("duration") or 1) / n)))   # samples a slice
+    try:
+        pipe.set_state(Gst.State.PLAYING)
+        if pipe.get_state(10 * SECOND)[0] == Gst.StateChangeReturn.FAILURE:
+            return []
+        import array
+        at = 0                      # samples read so far
+        while True:
+            sample = sink.emit("pull-sample")
+            if sample is None:
+                break
+            buf = sample.get_buffer()
+            ok, mi = buf.map(Gst.MapFlags.READ)
+            if not ok:
+                break
+            try:
+                vals = array.array("h")
+                vals.frombytes(bytes(mi.data[: len(mi.data) // 2 * 2]))
+            finally:
+                buf.unmap(mi)
+            for i, v in enumerate(vals):
+                k = (at + i) // per
+                if 0 <= k < n:
+                    a = abs(v) / 32768.0
+                    if a > peaks[k]:
+                        peaks[k] = a
+            at += len(vals)
+    finally:
+        pipe.set_state(Gst.State.NULL)
+    return peaks
+
+
+def waveform_async(info, done):
+    """Read the waveform on a thread; done(peaks) runs on the main loop. Asked for twice, the
+    second caller waits for the first."""
+    uri = info["uri"]
+    cached = _waves.get(uri)
+    if isinstance(cached, list):
+        done(cached)
+        return None
+    if cached == "reading":
+        return None
+    _waves[uri] = "reading"
+
+    def work():
+        try:
+            peaks = waveform(info)
+        except Exception:           # noqa: BLE001
+            peaks = []
+        _waves[uri] = peaks
+        GLib.idle_add(lambda: (done(peaks), False)[1])
+    import threading
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    return t
+
+
+def wave_cached(uri):
+    """The peaks already read for this media, or None."""
+    w = _waves.get(uri)
+    return w if isinstance(w, list) else None
+
+
+def forget_waves():
+    _waves.clear()
+
+
 def asset(uri):
     a = _assets.get(uri)
     if a is None:
@@ -377,6 +468,25 @@ def _add(project, layer, track, c, width, height, ex):
 
 
 # ------------------------------------------------------------------ preview
+def level_values(st):
+    """A level message as (peak dB, rms dB) for each channel, loudest first channel order kept."""
+    out = []
+    peak = st.get_value("peak") or []
+    rms = st.get_value("rms") or []
+    for i in range(max(len(peak), len(rms))):
+        p = float(peak[i]) if i < len(peak) else -100.0
+        r = float(rms[i]) if i < len(rms) else -100.0
+        out.append((p, r))
+    return out
+
+
+def db_to_bar(db):
+    """A decibel reading as 0..1 for a meter: -60 dB and below is nothing, 0 dB is full."""
+    if db is None or db <= -60.0:
+        return 0.0
+    return min(1.0, (db + 60.0) / 60.0)
+
+
 class Preview:
     """A pipeline that plays the project; widget is the picture (or None without gtksink)."""
 
@@ -397,11 +507,24 @@ class Preview:
             self.pipeline.preview_set_video_sink(self.sink)
             if self.sink.find_property("widget"):
                 self.widget = self.sink.get_property("widget")
-        a = os.environ.get("FOLIO_REEL_AUDIOSINK")
-        if a:
-            asink = Gst.ElementFactory.make(a)
-            if asink.find_property("sync"):
+        # the sound goes through a level meter, so the window can show how loud it is (R4-01)
+        a = os.environ.get("FOLIO_REEL_AUDIOSINK") or "autoaudiosink"
+        self.level = None
+        try:
+            abin = Gst.parse_bin_from_description(
+                "level name=lvl interval=50000000 post-messages=true ! audioconvert ! %s name=asink" % a, True)
+        except GLib.Error:
+            abin = None
+        if abin is not None:
+            asink = abin.get_by_name("asink")
+            if asink is not None and asink.find_property("sync"):
                 asink.set_property("sync", True)      # a stand-in sink still plays in real time
+            self.level = abin.get_by_name("lvl")
+            self.pipeline.preview_set_audio_sink(abin)
+        elif os.environ.get("FOLIO_REEL_AUDIOSINK"):
+            asink = Gst.ElementFactory.make(a)
+            if asink is not None and asink.find_property("sync"):
+                asink.set_property("sync", True)
             self.pipeline.preview_set_audio_sink(asink)
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
@@ -424,6 +547,10 @@ class Preview:
         elif t == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
             self.on_event("error", err.message)
+        elif t == Gst.MessageType.ELEMENT:
+            st = msg.get_structure()
+            if st is not None and st.get_name() == "level":
+                self.on_event("level", level_values(st))
 
     def refresh(self):
         """The project changed: rebuild the timeline in place and stay where we were."""

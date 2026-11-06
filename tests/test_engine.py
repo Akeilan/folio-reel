@@ -301,7 +301,35 @@ pv.pause()
 r.delete([vo["id"]])
 pv.refresh()
 check(close(pv.duration(), r.duration(), 0.1), "the preview follows edits")
+check(pv.level is not None, "the preview has a level meter on its sound (R4-01)")
 pv.close()
+
+# ---------------------------------------------------------------- R4-01 waveforms and levels
+loud = os.path.join(MEDIA, "loud.wav")
+quiet = os.path.join(MEDIA, "quiet.wav")
+if not os.path.exists(loud):
+    mkmedia.tone(loud, 2.0, 440, 0.9)
+if not os.path.exists(quiet):
+    mkmedia.tone(quiet, 2.0, 440, 0.1)
+wl = engine.waveform(engine.probe(loud))
+wq = engine.waveform(engine.probe(quiet))
+check(len(wl) == engine.wave_points(2.0) and len(wl) == 50, "a waveform has a peak every 40ms", len(wl))
+check(0.8 < max(wl) <= 1.0, "a loud tone peaks near the top", max(wl))
+check(0.05 < max(wq) < 0.2, "a quiet one stays low", max(wq))
+check(min(wl) > 0.5, "a steady tone is steady all the way through", min(wl))
+silent = engine.probe(M["silent"])
+check(engine.waveform(silent) == [] or max(engine.waveform(silent)) < 0.01, "a silent film draws nothing")
+check(engine.wave_points(3600) == engine.WAVE_MAX, "a very long film is capped", engine.wave_points(3600))
+
+engine.forget_waves()
+check(engine.wave_cached(engine.probe(loud)["uri"]) is None, "nothing is cached to begin with")
+got = []
+engine.waveform_async(engine.probe(loud), lambda w: got.append(w)).join()
+check(engine.wave_cached(engine.probe(loud)["uri"]) == wl, "reading it in the background caches it")
+
+check(engine.db_to_bar(0.0) == 1.0 and engine.db_to_bar(-60.0) == 0.0 and engine.db_to_bar(-120.0) == 0.0,
+      "0 dB fills the meter, -60 dB empties it")
+check(close(engine.db_to_bar(-30.0), 0.5, 0.01), "and -30 dB is half", engine.db_to_bar(-30.0))
 
 shutil.rmtree(T, ignore_errors=True)
 print("%d checks, %d failed" % (N[0], len(FAILS)))

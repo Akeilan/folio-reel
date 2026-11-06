@@ -4,18 +4,20 @@ A straightforward video editor for Zorin OS and Ubuntu: put clips on a timeline,
 titles and music, and make a file. Part of Folio Studio.
 
 It is the newest app in the suite and the least finished. What is here works; Backlog 4 lists
-what a video editor still needs (waveforms, chroma key, subtitles, proxies, markers).
+what a video editor still needs (chroma key, subtitles, proxies, markers).
 
 ## What it does
 
 - **Media**: import video, pictures and sound; record the screen, a window, a webcam or the
   microphone straight onto the timeline.
-- **Timeline**: several tracks, drag to arrange, trim, split, ripple delete, snapping, zoom.
+- **Timeline**: several tracks, drag to arrange, trim, split, ripple delete, snapping, zoom, and
+  each clip's sound drawn as a waveform so a cut can be made on what you hear.
 - **Clips**: speed, volume, fade in and out, pan and zoom (Ken Burns), crop, mute, and colour
   changes — brighter, darker, contrast, black and white — with keyframes.
 - **Between clips**: transitions with a duration you choose.
 - **Text**: titles, captions and lower thirds.
-- **Sound**: a music bed that ducks under speech.
+- **Sound**: a music bed that ducks under speech, and a level meter on the transport bar showing
+  the output while it plays.
 - **Export**: MP4 or WebM, at 24, 25, 30 or 60 frames a second, in 16:9, 4:3, 1:1 or 9:16.
 
 ## Layout

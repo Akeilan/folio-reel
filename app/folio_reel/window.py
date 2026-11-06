@@ -137,6 +137,15 @@ class ReelWindow(Gtk.ApplicationWindow):
         self.timecode = Gtk.Label(label="00:00:00:00")
         self.timecode.get_style_context().add_class("reel-timecode")
         bar.pack_start(self.timecode, False, False, 6)
+        # the output level while it plays (R4-01)
+        self.levels = [0.0, 0.0]
+        self.level_hold = [0.0, 0.0]
+        self.meter = Gtk.DrawingArea()
+        self.meter.set_size_request(74, 18)
+        self.meter.set_valign(Gtk.Align.CENTER)
+        self.meter.set_tooltip_text("Output level (left and right)")
+        self.meter.connect("draw", self._draw_meter)
+        bar.pack_end(self.meter, False, False, 6)
         fs = Gtk.Button()
         fs.add(icons.image("fullscreen", 16))
         fs.set_tooltip_text("Full-Screen Preview (F11)")
@@ -144,6 +153,51 @@ class ReelWindow(Gtk.ApplicationWindow):
         fs.connect("clicked", lambda *_: self.run("full-screen"))
         bar.pack_end(fs, False, False, 0)
         return bar
+
+    def _draw_meter(self, area, cr):
+        """Two bars, left and right, green up to about -18 dB, amber, then red at the top."""
+        from . import appearance
+        dark = appearance.is_dark()
+        w, h = area.get_allocated_width(), area.get_allocated_height()
+        cr.set_source_rgb(*((0.16, 0.16, 0.16) if dark else (0.80, 0.80, 0.80)))
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+        bh = (h - 3) / 2.0
+        # green to about -13 dB, amber to -5, red at the top (each band drawn on its own)
+        bands = ((0.78, (0.25, 0.70, 0.35)), (0.92, (0.90, 0.70, 0.20)), (1.0, (0.85, 0.25, 0.20)))
+        for i in range(2):
+            y = 1 + i * (bh + 1)
+            v = self.levels[i] if i < len(self.levels) else 0.0
+            at = 0.0
+            for upto, rgb in bands:
+                part = min(v, upto) - at
+                if part > 0:
+                    cr.set_source_rgb(*rgb)
+                    cr.rectangle(w * at, y, w * part, bh)
+                    cr.fill()
+                at = upto
+                if v <= upto:
+                    break
+            hold = self.level_hold[i] if i < len(self.level_hold) else 0.0
+            if hold > 0:
+                cr.set_source_rgb(0.95, 0.95, 0.95)
+                cr.rectangle(min(w - 1, int(w * hold)), y, 1, bh)
+                cr.fill()
+
+    def show_level(self, pairs):
+        """A level reading from the preview: the loudest sample since the last one, per channel."""
+        from . import engine
+        vals = [engine.db_to_bar(p) for p, _r in pairs[:2]] or [0.0]
+        while len(vals) < 2:
+            vals.append(vals[0])
+        self.levels = vals
+        self.level_hold = [max(h * 0.94, v) for h, v in zip(self.level_hold, vals)]
+        self.meter.queue_draw()
+
+    def clear_level(self):
+        self.levels = [0.0, 0.0]
+        self.level_hold = [0.0, 0.0]
+        self.meter.queue_draw()
 
     def _status_bar(self):
         bar = Gtk.Box(spacing=10)
@@ -297,6 +351,11 @@ class ReelWindow(Gtk.ApplicationWindow):
             self._after_seek()
         elif ev == "error":
             self.notice("Preview: %s" % val)
+        elif ev == "level":
+            if self.playing:
+                self.show_level(val or [])
+            else:
+                self.clear_level()
 
     def seek(self, t, accurate=True):
         """Move the playhead. Seeks are gathered up so dragging the playhead never queues a backlog."""
@@ -354,6 +413,7 @@ class ReelWindow(Gtk.ApplicationWindow):
         self.playing = False
         self._stop_tick()
         self._show_play_state()
+        self.clear_level()
         self._after_seek()
 
     def _stop_tick(self):

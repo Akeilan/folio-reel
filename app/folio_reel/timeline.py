@@ -150,6 +150,46 @@ class Timeline(Gtk.Box):
         GLib.idle_add(make)
         return None
 
+    def _wave(self, c):
+        """The sound peaks of a clip's media (read once, in the background) — R4-01."""
+        from . import engine
+        m = self.project.media_by_uri(c.get("media"))
+        if m is None or not m.get("has_audio"):
+            return None
+        w = engine.wave_cached(m["uri"])
+        if w is not None:
+            return w
+        engine.waveform_async(m, lambda _peaks: self.area.queue_draw())
+        return None
+
+    def _draw_wave(self, cr, c, x0, x1, y, h):
+        """The waveform across the clip, from the part of the media the clip shows."""
+        from . import engine
+        peaks = self._wave(c)
+        if not peaks:
+            return
+        W = self.area.get_allocated_width()
+        left, right = max(x0, HEAD), min(x1, W)
+        if right - left < 2:
+            return
+        speed = c.get("speed", 1.0) or 1.0
+        inp = c.get("inpoint", 0.0)
+        mid = y + h / 2.0
+        half = (h - 12) / 2.0
+        cr.set_source_rgba(1, 1, 1, 0.45)
+        step = 1.0 / self.pps * speed * engine.WAVE_RATE      # peaks a pixel
+        for px in range(int(left), int(right)):
+            a = (inp + (px - x0) / self.pps * speed) * engine.WAVE_RATE
+            i0 = int(a)
+            i1 = max(i0 + 1, int(a + step))
+            if i0 >= len(peaks):
+                break
+            v = max(peaks[i0:i1] or [0.0])
+            if v <= 0:
+                continue
+            cr.rectangle(px, mid - v * half, 1, max(1.0, v * half * 2))
+        cr.fill()
+
     def _text(self, cr, x, y, text, size=8.5, bold=False, rgb=(1, 1, 1), width=None):
         lay = PangoCairo.create_layout(cr)
         fd = Pango.FontDescription.from_string("Sans %s%s" % ("Bold " if bold else "", size))
@@ -283,6 +323,8 @@ class Timeline(Gtk.Box):
                 tx = x0 + 5
         else:
             tx = x0 + 5
+        if c["kind"] == "media" and not missing and (track in ("audio", "music") or h > 40):
+            self._draw_wave(cr, c, x0, x1, y + (h / 2 if track == "video" else 0), h / 2 if track == "video" else h)
         label = c["name"]
         if c.get("speed", 1.0) != 1.0:
             label += "  %g×" % c["speed"]

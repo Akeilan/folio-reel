@@ -46,6 +46,13 @@ try:
     win.run("undo")
     pump(0.2)
     settle()
+    # R4-01: the music clip's waveform is read and drawn
+    mclip = clips("music")[0]
+    win.timeline._wave(mclip)
+    check(wait(lambda: win.timeline._wave(mclip), 20), "the timeline reads the sound of a clip")
+    peaks = win.timeline._wave(mclip)
+    check(peaks and 0.2 < max(peaks) <= 1.0, "with peaks to draw", peaks and max(peaks))
+    settle()
     shot("02_clips")
 
     # ---------------------------------------------------------------- the timeline: select, move, snap, trim
@@ -149,8 +156,13 @@ try:
     pump(1.2)
     p1 = win.playhead
     check(p1 > 1.0, "the playhead moves while playing", p1)
+    # R4-01: the level meter follows the sound coming out
+    check(wait(lambda: max(win.levels) > 0.05, 6), "the level meter shows the output while it plays", win.levels)
+    shot("02b_playing")
+    check(max(win.level_hold) >= max(win.levels) - 1e-6, "and holds the loudest reading", (win.levels, win.level_hold))
     key("k")
     check(not win.playing, "K stops")
+    check(max(win.levels) == 0.0, "the meter falls back to nothing when it stops", win.levels)
     p2 = win.playhead
     key("l")
     key("l")
