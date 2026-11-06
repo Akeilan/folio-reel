@@ -148,6 +148,17 @@ def build_ribbon(win):
         [B.small("Lower Third", "reel-lowerthird", "insert-lower-third", "L", tip="Lower Third: a name and role over the picture"),
          B.small("Caption", "reel-caption", "insert-caption", "CA", tip="Caption: words across the bottom of the picture")],
     ])
+    B.group(t, "Proxies", [
+        [B.small("Make Small Copies", "reel-import", "make-proxies", "MP",
+                 tip="Make small copies of the videos for a smoother preview; exports use the originals"),
+         B.small("Use Small Copies", "reel-play", "use-proxies", "UP", tip="Play the small copies in the preview"),
+         B.small("Remove Small Copies", "reel-reset", "remove-proxies", "RP", tip="Throw the small copies away")],
+    ])
+    B.group(t, "Preview", [
+        [B.small("Full Size", "reel-play", "preview-quality:1", "QF", tip="Play the preview at full size"),
+         B.small("Half Size", "reel-play", "preview-quality:2", "QH", tip="Play the preview at half size: smoother on a slow machine"),
+         B.small("Quarter Size", "reel-play", "preview-quality:4", "QQ", tip="Play the preview at quarter size")],
+    ])
     B.group(t, "Subtitles", [
         [B.small("Import Subtitles", "reel-caption", "import-subtitles", "IS",
                  tip="Import Subtitles: an .srt file becomes captions on the Titles track"),
