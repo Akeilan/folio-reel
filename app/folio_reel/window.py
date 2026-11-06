@@ -325,6 +325,11 @@ class ReelWindow(Gtk.ApplicationWindow):
             self._detach_preview_widget()
             self.preview.close()
         self.preview = engine.Preview(self.project, on_event=self._preview_event)
+        q = self.app.settings.get("preview_quality", 1)
+        if q in (2, 4):
+            self.preview.set_quality(q)
+        if self.app.settings.get("use_proxies", False):
+            self.preview.set_proxies(True)
         w = self.preview.widget
         if w is None:
             w = Gtk.Label(label="The preview needs GStreamer's GTK sink (gstreamer1.0-gtk3).")
@@ -1020,6 +1025,77 @@ class ReelWindow(Gtk.ApplicationWindow):
 
     def cmd_insert_caption(self):
         return self._insert_text("caption")
+
+    # preview quality (R4-04)
+    def cmd_preview_quality(self, arg="1"):
+        """Play the preview at full size, half or quarter. Exports are not affected."""
+        try:
+            d = int(str(arg).strip())
+        except ValueError:
+            d = 1
+        d = d if d in (1, 2, 4) else 1
+        self.app.settings["preview_quality"] = d
+        self.app.save_settings()
+        if self.preview is not None:
+            self.preview.set_quality(d)
+            self._after_seek()
+        self.notice({1: "Preview at full size.", 2: "Preview at half size.",
+                     4: "Preview at quarter size."}[d])
+        return d
+
+    # proxies (R4-04)
+    def cmd_make_proxies(self, which=None):
+        """Small copies of the big videos, for a smoother preview. The originals are what any
+        export uses."""
+        from . import engine
+        want = [m for m in self.project.media if m.get("has_video") and not m.get("is_image")]
+        chosen = self.mediabin.selected_uris()
+        if chosen:
+            want = [m for m in want if m["uri"] in chosen]
+        if not want:
+            self.notice("There are no videos in the bin to copy.")
+            return 0
+        todo = [m for m in want if not os.path.exists(engine.proxy_path(m["uri"]))]
+        if not todo:
+            self.notice("Every one of those already has a small copy.")
+            self.cmd_use_proxies("on")
+            return 0
+        self.notice("Making %d small cop%s…" % (len(todo), "y" if len(todo) == 1 else "ies"))
+        made = []
+        for i, m in enumerate(todo):
+            self.notice("Making small copies: %d of %d (%s)…" % (i + 1, len(todo), m["name"]))
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+            if engine.make_proxy(m):
+                made.append(m["name"])
+        if made:
+            self.cmd_use_proxies("on")
+            self.notice("%d small cop%s ready; the preview uses them." % (len(made), "y" if len(made) == 1 else "ies"))
+        else:
+            self.notice("The small copies couldn't be made.")
+        return len(made)
+
+    def cmd_use_proxies(self, arg="toggle"):
+        """Whether the preview plays the small copies."""
+        cur = bool(self.app.settings.get("use_proxies", False))
+        on = not cur if arg == "toggle" else arg in ("on", "1", "true", "yes")
+        self.app.settings["use_proxies"] = on
+        self.app.save_settings()
+        if self.preview is not None:
+            self.preview.set_proxies(on)
+            self._after_seek()
+        self.notice("The preview plays the small copies." if on else "The preview plays the original files.")
+        return on
+
+    def cmd_remove_proxies(self):
+        from . import engine
+        n = engine.forget_proxies()
+        self.app.settings["use_proxies"] = False
+        self.app.save_settings()
+        if self.preview is not None:
+            self.preview.set_proxies(False)
+        self.notice("%d small cop%s removed." % (n, "y" if n == 1 else "ies"))
+        return n
 
     # subtitles (R4-03)
     def cmd_import_subtitles(self, path=None):

@@ -9,6 +9,7 @@ preview (R3-02) and for export (R3-06). GES, GStreamer and their plugins come fr
 """
 import copy
 import os
+import time
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -109,6 +110,102 @@ def thumbnail(info, t=None, width=160):
 
 
 _assets = {}
+
+
+# ------------------------------------------------------------------ proxies (R4-04)
+PROXY_WIDTH = 640
+
+
+def proxy_dir():
+    d = os.path.join(GLib.get_user_cache_dir(), "folio-reel", "proxies")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def proxy_path(uri, width=PROXY_WIDTH):
+    """Where the smaller copy of this media lives. Named after the file, its size and the time it
+    was last changed, so editing the original makes a new one rather than using a stale copy."""
+    import hashlib
+    path = model.uri_to_path(uri) or uri
+    try:
+        st = os.stat(path)
+        stamp = "%d-%d" % (st.st_size, int(st.st_mtime))
+    except OSError:
+        stamp = "0-0"
+    key = hashlib.sha1(("%s|%s|%d" % (uri, stamp, width)).encode()).hexdigest()[:16]
+    return os.path.join(proxy_dir(), "%s.mp4" % key)
+
+
+def proxy_size(info, width=PROXY_WIDTH):
+    w0 = int(info.get("width") or 0) or width
+    h0 = int(info.get("height") or 0) or int(width * 9 / 16)
+    if w0 <= width:
+        return (w0 // 2 * 2, h0 // 2 * 2)
+    h = int(round(width * h0 / w0))
+    return (width // 2 * 2, max(2, h // 2 * 2))
+
+
+def make_proxy(info, width=PROXY_WIDTH, on_progress=None, stop=None, timeout=1800):
+    """A small copy of a video for editing with. Returns its path, or None if it has no picture
+    or the copy couldn't be made. An existing copy is used as it is."""
+    init()
+    if not info.get("has_video") or info.get("is_image"):
+        return None
+    out = proxy_path(info["uri"], width)
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    w, h = proxy_size(info, width)
+    part = out + ".part"
+    prof = encoding_profile("mp4", w, h, 25)
+    pipe = Gst.ElementFactory.make("uritranscodebin")
+    if pipe is None:
+        return None
+    pipe.set_property("source-uri", info["uri"])
+    pipe.set_property("dest-uri", GLib.filename_to_uri(part, None))
+    pipe.set_property("profile", prof)
+    top = Gst.Pipeline.new("proxy")
+    top.add(pipe)
+    bus = top.get_bus()
+    top.set_state(Gst.State.PLAYING)
+    end = time.time() + timeout
+    ok = False
+    try:
+        while time.time() < end:
+            if stop and stop():
+                break
+            msg = bus.timed_pop_filtered(200 * Gst.MSECOND,
+                                         Gst.MessageType.EOS | Gst.MessageType.ERROR | Gst.MessageType.ASYNC_DONE)
+            if on_progress is not None:
+                dur = top.query_duration(Gst.Format.TIME)[1] or 0
+                pos = top.query_position(Gst.Format.TIME)[1] or 0
+                if dur > 0:
+                    on_progress(min(1.0, pos / dur))
+            if msg is None:
+                continue
+            if msg.type == Gst.MessageType.EOS:
+                ok = True
+                break
+            if msg.type == Gst.MessageType.ERROR:
+                break
+    finally:
+        top.set_state(Gst.State.NULL)
+    if ok and os.path.exists(part) and os.path.getsize(part) > 0:
+        os.replace(part, out)
+        if on_progress is not None:
+            on_progress(1.0)
+        return out
+    if os.path.exists(part):
+        os.remove(part)
+    return None
+
+
+def forget_proxies():
+    """Throw the small copies away (they are rebuilt when asked for again)."""
+    import shutil
+    d = os.path.join(GLib.get_user_cache_dir(), "folio-reel", "proxies")
+    n = len([f for f in os.listdir(d)]) if os.path.isdir(d) else 0
+    shutil.rmtree(d, ignore_errors=True)
+    return n
 
 
 # ------------------------------------------------------------------ waveforms (R4-01)
@@ -365,8 +462,10 @@ def _effects(project, c, clip, media):
             int(cr.get("l", 0) * mw), int(cr.get("r", 0) * mw), int(cr.get("t", 0) * mh), int(cr.get("b", 0) * mh))))
 
 
-def build(project, tl, width=None, height=None):
-    """Put the project's tracks on the timeline (replacing what was there). Returns {clip id: GES clip}."""
+def build(project, tl, width=None, height=None, proxies=False):
+    """Put the project's tracks on the timeline (replacing what was there). Returns {clip id: GES
+    clip}. proxies=True uses the small copies where they have been made (R4-04): the preview asks
+    for that, an export never does."""
     init()
     width = width or project.width
     height = height or project.height
@@ -404,7 +503,7 @@ def build(project, tl, width=None, height=None):
             prev = c
         for c in clips:
             layer = layers[name][slot[c["id"]]]
-            g = _add(project, layer, name, c, width, height, extra[c["id"]])
+            g = _add(project, layer, name, c, width, height, extra[c["id"]], proxies)
             if g is not None:
                 made[c["id"]] = g
         # wipes and the like: the transition GES made where two clips overlap
@@ -425,12 +524,20 @@ def build(project, tl, width=None, height=None):
     return made
 
 
-def _add(project, layer, track, c, width, height, ex):
+def _add(project, layer, track, c, width, height, ex, proxies=False):
     if c["kind"] == "media":
         media = project.media_by_uri(c["media"])
         if media is None or not os.path.exists(model.uri_to_path(c["media"]) or ""):
             return None
-        a = asset(c["media"])
+        uri = c["media"]
+        if proxies and media.get("has_video") and not media.get("is_image"):
+            # the small copy, where one has been made: same film, fewer pixels to push (R4-04)
+            pp = proxy_path(uri)
+            if os.path.exists(pp):
+                uri = GLib.filename_to_uri(pp, None)
+                pw, ph = proxy_size(media)
+                media = dict(media, width=pw, height=ph)
+        a = asset(uri)
         types = GES.TrackType.AUDIO if track in ("audio", "music") else GES.TrackType.UNKNOWN
         sp = float(c.get("speed", 1.0))
         span = c["duration"] * sp
@@ -562,7 +669,9 @@ class Preview:
         # loading media runs the main loop for a moment: a seek that comes in then waits for the rebuild
         self.building = False
         self._pending_seek = None
-        self._size = (project.width, project.height)
+        self.quality = 1
+        self.proxies = False
+        self._size = (project.width, project.height, 1)
         self.refresh()
         self.pipeline.set_state(Gst.State.PAUSED)
 
@@ -579,6 +688,35 @@ class Preview:
             if st is not None and st.get_name() == "level":
                 self.on_event("level", level_values(st))
 
+    def set_proxies(self, on):
+        """Edit through the small copies, or the originals (R4-04)."""
+        on = bool(on)
+        if on == getattr(self, "proxies", False):
+            return on
+        self.proxies = on
+        self.refresh()
+        return on
+
+    def set_quality(self, divisor):
+        """Play the preview at full size (1), half (2) or quarter (4). The project and every
+        export keep their own size; only what the pipeline has to draw gets smaller (R4-04)."""
+        if divisor not in (1, 2, 4):
+            return getattr(self, "quality", 1)       # anything else: leave it as it is
+        d = divisor
+        if d == getattr(self, "quality", 1):
+            return d
+        self.quality = d
+        self._size = None       # make _refresh set the caps again
+        self.refresh()
+        return d
+
+    def preview_size(self):
+        """The size the preview is drawing at."""
+        d = max(1, getattr(self, "quality", 1))
+        w = max(16, (self.project.width // d) // 2 * 2)
+        h = max(16, (self.project.height // d) // 2 * 2)
+        return w, h
+
     def refresh(self):
         """The project changed: rebuild the timeline in place and stay where we were."""
         if self.building:
@@ -594,20 +732,21 @@ class Preview:
 
     def _refresh(self):
         pos = self.position()
-        if (self.project.width, self.project.height) != self._size:
-            self._size = (self.project.width, self.project.height)
+        want = (self.project.width, self.project.height, getattr(self, "quality", 1))
+        if want != self._size:
+            self._size = want
+            pw, ph = self.preview_size()
             for t in self.timeline.get_tracks():
                 if t.get_property("track-type") == GES.TrackType.VIDEO:
                     t.set_restriction_caps(Gst.Caps.from_string(
-                        "video/x-raw,width=%d,height=%d,framerate=%d/1" % (self.project.width, self.project.height,
-                                                                           int(self.project.fps))))
+                        "video/x-raw,width=%d,height=%d,framerate=%d/1" % (pw, ph, int(self.project.fps))))
         # The old clips are freed by the rebuild: the pipeline stops first (READY) so no streaming
         # thread is still using them, then prerolls the new timeline.
         if self.state == "playing":
             self.pause()
         self.pipeline.set_state(Gst.State.READY)
         self.pipeline.get_state(5 * SECOND)
-        build(self.project, self.timeline)
+        build(self.project, self.timeline, proxies=self.proxies)
         self.timeline.commit()
         self.pipeline.set_state(Gst.State.PAUSED)
         # not a blocking wait: GTK's video sink shows frames through the main loop

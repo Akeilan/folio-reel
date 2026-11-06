@@ -270,6 +270,29 @@ try:
     check(any(c["kind"] == "caption" for c in clips("titles")), "a caption (after the lower third: no overlap)",
           [c["start"] for c in clips("titles")])
 
+    # ---------------------------------------------------------------- R4-04 preview size, proxies
+    check(win.run("preview-quality:2") == 2 and win.preview.preview_size() ==
+          (win.project.width // 2, win.project.height // 2), "Half Size draws a smaller preview",
+          win.preview.preview_size())
+    check(win.app.settings.get("preview_quality") == 2, "and it is remembered")
+    win.run("preview-quality:1")
+    check(win.preview.preview_size() == (win.project.width, win.project.height), "Full Size again",
+          win.preview.preview_size())
+    from folio_reel import engine as _eng
+    _eng.forget_proxies()
+    win.run("use-proxies:on")
+    check(win.app.settings.get("use_proxies") and win.preview.proxies, "the preview can be told to use small copies")
+    check(win.playing is False and win.preview.duration() > 0, "with none made yet, it plays as before",
+          win.preview.duration())
+    win.mediabin.select_uri(URI["red"])
+    n = win.run("make-proxies")
+    pump(0.3)
+    check(n == 1 and os.path.exists(_eng.proxy_path(URI["red"])), "Make Small Copies makes one for the chosen film", n)
+    check(win.preview.duration() > 0, "and the preview still plays", win.preview.duration())
+    check(win.run("remove-proxies") >= 1 and not os.path.exists(_eng.proxy_path(URI["red"])),
+          "Remove Small Copies throws them away")
+    check(not win.app.settings.get("use_proxies") and not win.preview.proxies, "and goes back to the originals")
+
     # ---------------------------------------------------------------- R4-03 subtitles
     srt_in = os.path.join(OUT, "in.srt")
     open(srt_in, "w").write("1\n00:00:00,500 --> 00:00:02,000\nFirst subtitle\n\n"

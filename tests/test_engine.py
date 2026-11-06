@@ -245,6 +245,52 @@ fl = mkmedia.frame_color(out, 1.0)
 check(fl[0] > 150, "a see-through title shows the clip underneath", fl)
 r.delete([tt["id"]])
 
+# ---------------------------------------------------------------- R4-04 preview size and proxies
+big = os.path.join(MEDIA, "Big Clip.mp4")
+if not os.path.exists(big):
+    mkmedia.video(big, "smpte", 3, 440, w=1920, h=1080)
+bi = engine.probe(big)
+check(engine.proxy_size(bi) == (640, 360), "a small copy keeps the shape", engine.proxy_size(bi))
+check(engine.proxy_size({"width": 320, "height": 240}) == (320, 240), "and a small file is left as it is")
+engine.forget_proxies()
+prog = []
+pp = engine.make_proxy(bi, on_progress=prog.append)
+check(pp and os.path.exists(pp), "a small copy is made", pp)
+if pp:
+    pi = engine.probe(pp)
+    check((pi["width"], pi["height"]) == (640, 360) and close(pi["duration"], bi["duration"], 0.2),
+          "same film, fewer pixels", (pi["width"], pi["height"], round(pi["duration"], 2)))
+    check(os.path.getsize(pp) < os.path.getsize(big), "and a smaller file",
+          (os.path.getsize(pp), os.path.getsize(big)))
+    check(prog and prog[-1] == 1.0, "with progress", len(prog))
+    check(engine.make_proxy(bi) == pp, "asking again uses the copy already there")
+
+pr = model.Project()
+pr.add_media(bi)
+pr.add_clip("video", pr.media_by_uri(bi["uri"]))
+tl = engine.make_timeline(pr.width, pr.height, pr.fps)
+engine.build(pr, tl, proxies=True)
+uris = [c.get_asset().get_id() for layer in tl.get_layers() for c in layer.get_clips() if c.get_asset()]
+check(pp and any("proxies" in u for u in uris), "the preview plays the small copy", uris)
+tl2 = engine.make_timeline(pr.width, pr.height, pr.fps)
+engine.build(pr, tl2, proxies=False)
+uris2 = [c.get_asset().get_id() for layer in tl2.get_layers() for c in layer.get_clips() if c.get_asset()]
+check(all("proxies" not in u for u in uris2), "an export always uses the original", uris2)
+
+pv2 = engine.Preview(pr)
+check(pv2.preview_size() == (pr.width, pr.height), "the preview starts at full size", pv2.preview_size())
+pv2.set_quality(2)
+check(pv2.preview_size() == (pr.width // 2, pr.height // 2), "half size", pv2.preview_size())
+pv2.set_quality(4)
+check(pv2.preview_size() == (pr.width // 4, pr.height // 4), "quarter size", pv2.preview_size())
+pv2.set_quality(3)
+check(pv2.preview_size() == (pr.width // 4, pr.height // 4), "and nothing else is accepted", pv2.preview_size())
+pv2.set_quality(1)
+check(close(pv2.duration(), pr.duration(), 0.2), "the film is the same length whatever the preview size",
+      (pv2.duration(), pr.duration()))
+pv2.close()
+check(engine.forget_proxies() >= 1, "the small copies can be thrown away")
+
 # ---------------------------------------------------------------- R4-03 subtitles
 from folio_reel import subtitles  # noqa: E402
 
