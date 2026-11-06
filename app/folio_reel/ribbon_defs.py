@@ -148,6 +148,12 @@ def build_ribbon(win):
         [B.small("Lower Third", "reel-lowerthird", "insert-lower-third", "L", tip="Lower Third: a name and role over the picture"),
          B.small("Caption", "reel-caption", "insert-caption", "CA", tip="Caption: words across the bottom of the picture")],
     ])
+    B.group(t, "Subtitles", [
+        [B.small("Import Subtitles", "reel-caption", "import-subtitles", "IS",
+                 tip="Import Subtitles: an .srt file becomes captions on the Titles track"),
+         B.small("Export Subtitles", "reel-caption", "export-subtitles", "ES",
+                 tip="Export Subtitles: the captions written out as an .srt beside the film")],
+    ])
     r.add_tab(t)
 
     # ================================================================ Transitions
