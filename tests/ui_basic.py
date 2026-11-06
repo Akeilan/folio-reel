@@ -241,7 +241,9 @@ try:
     t = clips("titles")
     check(len(t) == 1 and t[0]["kind"] == "title", "Insert > Title at the playhead", t)
     tv = win.clipset.controls.get("text")
-    check(tv is not None and tv.has_focus(), "its text is ready to type over")
+    # is_focus(): the window's focus is on the box. has_focus() also needs the window to be the
+    # active one, which a headless Wayland compositor doesn't hand out.
+    check(tv is not None and (tv.has_focus() or tv.is_focus()), "its text is ready to type over")
     tv.get_buffer().set_text("My Holiday")
     pump(0.2)
     check(clips("titles")[0]["text"] == "My Holiday" and clips("titles")[0]["name"] == "My Holiday", "typing changes the title")
