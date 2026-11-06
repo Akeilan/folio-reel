@@ -35,7 +35,9 @@ def clip_defaults():
     return {"speed": 1.0, "volume": 1.0, "fade_in": 0.0, "fade_out": 0.0,
             "color": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "hue": 0.0},
             "crop": {"l": 0.0, "r": 0.0, "t": 0.0, "b": 0.0}, "zoom": 1.0, "panzoom": None,
-            "transition": None, "music_bed": False, "keyframes": [], "muted": False}
+            "transition": None, "music_bed": False, "keyframes": [], "muted": False,
+            "chroma": False, "chroma_color": "green", "chroma_tolerance": 20.0,
+            "chroma_softness": 2.0, "chroma_edges": 100}
 
 
 def end_of(c):

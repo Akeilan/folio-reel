@@ -326,7 +326,34 @@ def _place(project, c, vs, width, height):
             vs.set_child_property(prop, v)
 
 
+# ---------------------------------------------------------------- chroma key (R4-02)
+CHROMA_COLORS = [("Green", "green"), ("Blue", "blue")]
+
+
+def chroma_target(name):
+    """The colour being keyed out, as (r, g, b) 0..255."""
+    if isinstance(name, str) and name.startswith("#") and len(name) == 7:
+        return tuple(int(name[i:i + 2], 16) for i in (1, 3, 5))
+    return (0, 0, 255) if name == "blue" else (0, 255, 0)
+
+
+def chroma_effect(c):
+    """The alpha element that keys this clip's background out, or None."""
+    if not c.get("chroma"):
+        return None
+    r, g, b = chroma_target(c.get("chroma_color", "green"))
+    tol = float(c.get("chroma_tolerance", 20.0))
+    soft = float(c.get("chroma_softness", 2.0))
+    edge = int(c.get("chroma_edges", 100))
+    # custom with the exact colour: green and blue are the same element's own presets
+    return ("alpha method=custom target-r=%d target-g=%d target-b=%d angle=%g noise-level=%g "
+            "black-sensitivity=%d white-sensitivity=%d" % (r, g, b, tol, soft, edge, edge))
+
+
 def _effects(project, c, clip, media):
+    key = chroma_effect(c)
+    if key:
+        clip.add(GES.Effect.new(key))
     col = c.get("color") or {}
     if any(abs(col.get(k, d) - d) > 1e-6 for k, d in (("brightness", 0.0), ("contrast", 1.0), ("saturation", 1.0), ("hue", 0.0))):
         clip.add(GES.Effect.new("videobalance brightness=%f contrast=%f saturation=%f hue=%f" % (
