@@ -223,6 +223,28 @@ class ClipSettings(Gtk.Box):
             pz = [i for i, (_l, k) in enumerate(PANZOOM) if k == c.get("panzoom")]
             self._row(box, "Pan and zoom", self._combo("panzoom", [l for l, _k in PANZOOM], pz[0] if pz else 0,
                                                        lambda i: self._set("Pan and Zoom", panzoom=PANZOOM[i][1])))
+            # ---- chroma key (R4-02)
+            from . import engine
+            self._section(box, "Chroma key")
+            on = Gtk.CheckButton(label="Key out a background colour")
+            on.set_active(c.get("chroma", False))
+            on.connect("toggled", lambda b: self._quiet or self._set("Chroma Key", chroma=b.get_active()))
+            self.controls["chroma"] = on
+            box.pack_start(on, False, False, 0)
+            names = [n for n, _k in engine.CHROMA_COLORS]
+            keys = [k for _n, k in engine.CHROMA_COLORS]
+            cur = keys.index(c.get("chroma_color", "green")) if c.get("chroma_color", "green") in keys else 0
+            self._row(box, "Colour", self._combo("chroma_color", names, cur,
+                                                 lambda i: self._set("Chroma Colour", chroma_color=keys[i])))
+            self._row(box, "Tolerance", self._scale("chroma_tolerance", 1, 90, 1, c.get("chroma_tolerance", 20.0),
+                                                    lambda v: "%.0f°" % v,
+                                                    lambda v: self._set("Chroma Tolerance", chroma_tolerance=v)))
+            self._row(box, "Softness", self._scale("chroma_softness", 0, 64, 1, c.get("chroma_softness", 2.0),
+                                                   lambda v: "%.0f" % v,
+                                                   lambda v: self._set("Chroma Softness", chroma_softness=v)))
+            self._row(box, "Keep edges", self._scale("chroma_edges", 0, 128, 1, c.get("chroma_edges", 100),
+                                                     lambda v: "%.0f" % v,
+                                                     lambda v: self._set("Chroma Edges", chroma_edges=int(v))))
             cr = c.get("crop") or {}
             for k, lab in (("l", "Crop left %"), ("r", "Crop right %"), ("t", "Crop top %"), ("b", "Crop bottom %")):
                 self._row(box, lab, self._spin("crop_" + k, 0, 45, 1, cr.get(k, 0) * 100,
@@ -277,5 +299,12 @@ class ClipSettings(Gtk.Box):
                 w = self.controls.get(k)
                 if w is not None and abs(w.get_value() - col.get(k, d)) > 1e-6:
                     w.set_value(col.get(k, d))
+            w = self.controls.get("chroma")
+            if w is not None:
+                w.set_active(c.get("chroma", False))
+            for k, d in (("chroma_tolerance", 20.0), ("chroma_softness", 2.0), ("chroma_edges", 100)):
+                w = self.controls.get(k)
+                if w is not None and abs(w.get_value() - float(c.get(k, d))) > 1e-6:
+                    w.set_value(float(c.get(k, d)))
         finally:
             self._quiet = False

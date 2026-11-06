@@ -265,6 +265,25 @@ try:
     check(any(c["kind"] == "caption" for c in clips("titles")), "a caption (after the lower third: no overlap)",
           [c["start"] for c in clips("titles")])
 
+    # ---------------------------------------------------------------- R4-02 chroma key
+    vid = clips("video")[0]
+    win.timeline.select([vid["id"]])
+    settle()
+    ck = win.clipset.controls.get("chroma")
+    check(ck is not None and not ck.get_active(), "Clip Settings has a chroma key, off to begin with")
+    ck.set_active(True)
+    pump(0.3)
+    check(win.project.clip(vid["id"])["chroma"], "ticking it keys the clip")
+    tol = win.clipset.controls.get("chroma_tolerance")
+    tol.set_value(35)
+    pump(0.3)
+    check(abs(win.project.clip(vid["id"])["chroma_tolerance"] - 35) < 0.01, "and the tolerance follows the slider",
+          win.project.clip(vid["id"])["chroma_tolerance"])
+    win.run("undo")
+    win.run("undo")
+    pump(0.2)
+    check(not win.project.clip(vid["id"])["chroma"], "undo takes the key off again")
+
     # ---------------------------------------------------------------- sound (R3-05)
     mus = clips("music")[0]
     win.timeline.select([mus["id"]])
