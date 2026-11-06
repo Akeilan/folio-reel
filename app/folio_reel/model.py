@@ -317,6 +317,24 @@ class Project:
         self._changed()
         return c
 
+    def add_subtitles(self, entries):
+        """Subtitles (R4-03) as caption clips on the Titles track, each at its own time. Captions
+        already there are left alone; overlapping ones are moved along as any clip would be."""
+        if not entries:
+            return []
+        self.checkpoint("Import Subtitles")
+        made = []
+        for start, end, words in entries:
+            c = self._text_clip("caption", words)
+            c["start"] = max(0.0, float(start))
+            c["duration"] = max(0.1, float(end) - float(start))
+            c["start"] = self._first_free("titles", c["start"], c["duration"])
+            self.data["tracks"]["titles"].append(c)
+            self._sort("titles")
+            made.append(c)
+        self._changed()
+        return made
+
     # ------------------------------------------------------------ editing
     def _split(self, track, c, t):
         b = copy.deepcopy(c)

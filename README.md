@@ -4,7 +4,7 @@ A straightforward video editor for Zorin OS and Ubuntu: put clips on a timeline,
 titles and music, and make a file. Part of Folio Studio.
 
 It is the newest app in the suite and the least finished. What is here works; Backlog 4 lists
-what a video editor still needs (subtitles, proxies, markers).
+what a video editor still needs (proxies, markers).
 
 ## What it does
 
@@ -18,6 +18,8 @@ what a video editor still needs (subtitles, proxies, markers).
   edge setting, so what is under it on the timeline shows through.
 - **Between clips**: transitions with a duration you choose.
 - **Text**: titles, captions and lower thirds.
+- **Subtitles**: import an .srt and it becomes captions on the Titles track, trimmed and styled
+  like any clip and burned into the picture on export; write the captions back out as an .srt.
 - **Sound**: a music bed that ducks under speech, and a level meter on the transport bar showing
   the output while it plays.
 - **Export**: MP4 or WebM, at 24, 25, 30 or 60 frames a second, in 16:9, 4:3, 1:1 or 9:16.

@@ -265,6 +265,27 @@ try:
     check(any(c["kind"] == "caption" for c in clips("titles")), "a caption (after the lower third: no overlap)",
           [c["start"] for c in clips("titles")])
 
+    # ---------------------------------------------------------------- R4-03 subtitles
+    srt_in = os.path.join(OUT, "in.srt")
+    open(srt_in, "w").write("1\n00:00:00,500 --> 00:00:02,000\nFirst subtitle\n\n"
+                            "2\n00:00:02,500 --> 00:00:04,000\nSecond subtitle\n")
+    before = len([c for c in clips("titles") if c["kind"] == "caption"])
+    win.run("import-subtitles:%s" % srt_in)
+    pump(0.3)
+    caps = [c for c in clips("titles") if c["kind"] == "caption"]
+    check(len(caps) == before + 2, "Import Subtitles puts them on the Titles track", len(caps))
+    check(any(c["text"] == "First subtitle" for c in caps), "with their words", [c["text"] for c in caps])
+    srt_out = os.path.join(OUT, "out.srt")
+    win.run("export-subtitles:%s" % srt_out)
+    pump(0.3)
+    written = open(srt_out).read()
+    check("First subtitle" in written and "-->" in written, "Export Subtitles writes an .srt", written[:40])
+    from folio_reel import subtitles as _subs
+    check(len(_subs.parse(written)) == len(caps), "holding every caption", len(_subs.parse(written)))
+    win.run("undo")
+    pump(0.2)
+    check(len([c for c in clips("titles") if c["kind"] == "caption"]) == before, "undo takes them off again")
+
     # ---------------------------------------------------------------- R4-02 chroma key
     vid = clips("video")[0]
     win.timeline.select([vid["id"]])

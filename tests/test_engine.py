@@ -245,6 +245,38 @@ fl = mkmedia.frame_color(out, 1.0)
 check(fl[0] > 150, "a see-through title shows the clip underneath", fl)
 r.delete([tt["id"]])
 
+# ---------------------------------------------------------------- R4-03 subtitles
+from folio_reel import subtitles  # noqa: E402
+
+srt = """1
+00:00:01,000 --> 00:00:03,500
+Hello there
+
+2
+00:00:04,000 --> 00:00:06,000
+Second line
+and more
+"""
+ents = subtitles.parse(srt)
+check(ents == [(1.0, 3.5, "Hello there"), (4.0, 6.0, "Second line\nand more")], "an .srt is read", ents)
+check(subtitles.parse(subtitles.write(ents)) == ents, "and written back the same")
+check(subtitles.fmt_time(3661.25) == "01:01:01,250", "times are written as SRT does", subtitles.fmt_time(3661.25))
+odd = subtitles.parse("00:00:02.500 --> 00:00:04.000\nNo number, stops not commas\n\n\nrubbish\n")
+check(odd == [(2.5, 4.0, "No number, stops not commas")], "a file without numbering, with stops, and a bad block", odd)
+check(subtitles.parse("") == [] and subtitles.write([]) == "", "nothing in, nothing out")
+
+sp = model.Project()
+sp.add_media(info["red"])
+sp.add_clip("video", sp.media_by_uri(info["red"]["uri"]))
+made = sp.add_subtitles(ents)
+caps = [c for c in sp.track("titles") if c["kind"] == "caption"]
+check(len(made) == 2 and len(caps) == 2, "they become caption clips on the Titles track", len(caps))
+check(close(caps[0]["start"], 1.0) and close(caps[0]["duration"], 2.5) and caps[0]["text"] == "Hello there",
+      "at their own times", (caps[0]["start"], caps[0]["duration"]))
+check(subtitles.from_clips(sp.track("titles")) == ents, "and come back out as the same subtitles")
+sp.undo()
+check(not [c for c in sp.track("titles") if c["kind"] == "caption"], "importing them is one undo step")
+
 # ---------------------------------------------------------------- R4-02 chroma key
 green_path = os.path.join(MEDIA, "Green Screen.mp4")
 if not os.path.exists(green_path):

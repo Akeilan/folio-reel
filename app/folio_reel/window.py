@@ -1021,6 +1021,56 @@ class ReelWindow(Gtk.ApplicationWindow):
     def cmd_insert_caption(self):
         return self._insert_text("caption")
 
+    # subtitles (R4-03)
+    def cmd_import_subtitles(self, path=None):
+        """Read an .srt into caption clips on the Titles track."""
+        from . import subtitles
+        if path is None:
+            fc = self._chooser("Import Subtitles", Gtk.FileChooserAction.OPEN,
+                               filters=[("Subtitles (.srt)", ["*.srt"]), ("All files", ["*"])])
+            ok = fc.run() == Gtk.ResponseType.ACCEPT
+            path = fc.get_filename() if ok else None
+            fc.destroy()
+        if not path:
+            return None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                entries = subtitles.parse(f.read())
+        except OSError as e:
+            self.notice("Couldn't read %s: %s" % (os.path.basename(path), e))
+            return None
+        if not entries:
+            self.notice("There are no subtitles in that file.")
+            return None
+        made = self.edit(lambda p: p.add_subtitles(entries))
+        self.notice("%d subtitles added to the Titles track." % len(entries))
+        return made
+
+    def cmd_export_subtitles(self, path=None):
+        """Write the caption clips out as an .srt."""
+        from . import subtitles
+        entries = subtitles.from_clips(self.project.track("titles"))
+        if not entries:
+            self.notice("There are no captions to write out. Insert > Caption makes one.")
+            return None
+        if path is None:
+            fc = self._chooser("Export Subtitles", Gtk.FileChooserAction.SAVE,
+                               os.path.splitext(self.doc_name())[0] + ".srt",
+                               [("Subtitles (.srt)", ["*.srt"])])
+            ok = fc.run() == Gtk.ResponseType.ACCEPT
+            path = fc.get_filename() if ok else None
+            fc.destroy()
+        if not path:
+            return None
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(subtitles.write(entries))
+        except OSError as e:
+            self.notice("Couldn't write %s: %s" % (os.path.basename(path), e))
+            return None
+        self.notice("%d subtitles written to %s." % (len(entries), os.path.basename(path)))
+        return path
+
     # transitions (R3-03)
     def cmd_transition(self, kind):
         sel = self.sel_or_say("the clip to transition into")
