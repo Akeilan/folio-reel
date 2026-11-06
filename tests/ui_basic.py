@@ -1,5 +1,6 @@
 # Folio Reel, driven as a user would (R3-01..R3-06, R3-09, R3-10). Run with run_ui.sh ui_basic.py.
 import os
+import time
 import tempfile
 import traceback
 
@@ -167,8 +168,12 @@ try:
     key("l")
     key("l")
     check(win.shuttle == 2 and win.preview.rate == 2.0, "L L: twice the speed", (win.shuttle, win.preview.rate))
+    t0 = time.time()
     pump(2.0)
-    check(win.playhead > p2 + 2.2, "and it goes faster than real time", (p2, win.playhead))
+    elapsed = time.time() - t0
+    # faster than real time, with room for a machine that is busy with something else
+    check(win.playhead - p2 > elapsed * 1.25, "and it goes faster than real time",
+          (round(win.playhead - p2, 2), round(elapsed, 2)))
     key("k")
     p3 = win.playhead
     key("j")
