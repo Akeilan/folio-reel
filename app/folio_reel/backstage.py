@@ -5,7 +5,7 @@ from gi.repository import Gtk, Pango
 
 from . import APP_NAME, VERSION, icons
 from .engine import FORMATS
-from .model import PRESETS
+from .model import EXPORT_PRESETS, PRESETS
 
 PAGES = [("home", "Home", "B"), ("new", "New", "N"), ("open", "Open", "O"), ("save", "Save", "S"),
          ("save-as", "Save As", "A"), ("export", "Export", "E"), ("close", "Close", "C"), ("about", "About", "D")]
@@ -168,6 +168,23 @@ class Backstage(Gtk.Box):
                                                                             self.preset.get_active_id())))
         self.export_button = go
         self.body.pack_start(go, False, False, 0)
+        # named presets, and a queue that runs them one after another (R4-08)
+        lab = Gtk.Label(xalign=0)
+        lab.set_markup("<b>Presets</b>")
+        lab.set_margin_top(18)
+        self.body.pack_start(lab, False, False, 0)
+        hint = Gtk.Label(label="One click picks the format and the size. Several exports wait their turn and run "
+                               "one after another, so the machine isn't trying to make them all at once.", xalign=0)
+        hint.get_style_context().add_class("dim-label")
+        hint.set_line_wrap(True)
+        self.body.pack_start(hint, False, False, 0)
+        self.preset_buttons = []
+        for name, fmt, size in EXPORT_PRESETS:
+            b = Gtk.Button(label=name)
+            b.set_halign(Gtk.Align.START)
+            b.connect("clicked", lambda _b, f=fmt, p=size: (self.close(), self.win.export_as(f, p)))
+            self.preset_buttons.append((name, b))
+            self.body.pack_start(b, False, False, 0)
 
     def _page_about(self):
         self._title("About")

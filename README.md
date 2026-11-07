@@ -27,7 +27,9 @@ what a video editor still needs (markers, nested clips, stabilisation).
   the output while it plays.
 - **Preview**: play it at full, half or quarter size, and make small copies of big videos to edit
   through (the originals are what every export uses).
-- **Export**: MP4 or WebM, at 24, 25, 30 or 60 frames a second, in 16:9, 4:3, 1:1 or 9:16.
+- **Export**: MP4 or WebM, at 24, 25, 30 or 60 frames a second, in 16:9, 4:3, 1:1 or 9:16. Named
+  presets pick the format and the size in one click, and several exports wait their turn and run
+  one after another while you keep editing.
 
 ## Layout
 

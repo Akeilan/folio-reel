@@ -35,6 +35,7 @@ class ReelWindow(Gtk.ApplicationWindow):
         self._own_change = False
         self._alt_alone = False
         self.exports = []
+        self.export_queue = []        # exports waiting their turn (R4-08)
         self.recorder = None
         self.full = None
         geo = app.settings.get("window", {})
@@ -715,12 +716,25 @@ class ReelWindow(Gtk.ApplicationWindow):
         return self.start_export(path, fmt, preset)
 
     def start_export(self, path, fmt, preset):
+        """Put an export in the queue. One runs at a time; the rest wait their turn (R4-08)."""
+        self.export_queue.append((path, fmt, preset))
+        if self.exports:
+            self.notice("%s is waiting its turn: %d in the queue." % (os.path.basename(path), len(self.export_queue)))
+            self._export_progress()
+            return None
+        return self._next_export()
+
+    def _next_export(self):
+        """Start the export at the head of the queue, if nothing is running."""
+        if self.exports or not self.export_queue:
+            return None
+        path, fmt, preset = self.export_queue.pop(0)
         try:
             ex = engine.Exporter(self.project, path, fmt, preset, on_progress=lambda f: self._export_progress(),
                                  on_done=lambda p, err, e=None: None)
         except model.EditError as e:
             self.message(str(e))
-            return None
+            return self._next_export()
         ex.on_done = lambda p, err, ex=ex: self._export_done(ex, p, err)
         self.exports.append(ex)
         ex.start()
@@ -734,24 +748,38 @@ class ReelWindow(Gtk.ApplicationWindow):
             return
         frac = sum(getattr(e, "fraction", 0.0) for e in live) / len(live)
         self.export_bar.set_fraction(frac)
-        self.export_label.set_text("Exporting %s… %d%%" % (os.path.basename(live[0].path), int(frac * 100))
-                                   if len(live) == 1 else "Exporting %d videos… %d%%" % (len(live), int(frac * 100)))
+        waiting = len(self.export_queue)
+        said = "Exporting %s… %d%%" % (os.path.basename(live[0].path), int(frac * 100)) if len(live) == 1 else \
+               "Exporting %d videos… %d%%" % (len(live), int(frac * 100))
+        if waiting:
+            said += "  (%d waiting)" % waiting
+        self.export_label.set_text(said)
 
     def _export_done(self, ex, path, err):
         if ex in self.exports:
             self.exports.remove(ex)
-        if not self.exports:
-            self.export_box.hide()
         if err == "cancelled":
             self.notice("Export cancelled.")
         elif err:
             self.notice("Export failed: %s" % err, 20)
         else:
-            self.notice("Exported %s." % os.path.basename(path), 20)
+            left = len(self.export_queue)
+            self.notice("Exported %s.%s" % (os.path.basename(path), " %d still to go." % left if left else ""), 20)
+        if self.export_queue:
+            self._next_export()
+        elif not self.exports:
+            self.export_box.hide()
 
     def cancel_exports(self):
+        """Stop what is running and empty the queue (R4-08)."""
+        waiting = len(self.export_queue)
+        self.export_queue.clear()
         for e in list(self.exports):
             e.cancel()
+        if waiting and not self.exports:
+            self.export_box.hide()
+        if waiting:
+            self.notice("%d export(s) taken out of the queue." % waiting)
 
     # ------------------------------------------------------------ recording (R3-07)
     def record(self, kind):
