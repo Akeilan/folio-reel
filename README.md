@@ -12,6 +12,8 @@ what a video editor still needs (markers, nested clips, stabilisation).
   microphone straight onto the timeline.
 - **Timeline**: several tracks, drag to arrange, trim, split, ripple delete, snapping, zoom, and
   each clip's sound drawn as a waveform so a cut can be made on what you hear.
+- **Groups**: Ctrl+G makes the selected clips one group — clicking one picks them all, and they
+  move and trim as a single clip until Ctrl+Shift+G breaks them up.
 - **Markers**: M marks this moment on the timeline, Shift+M names it and picks its colour, and
   the comma and full stop keys walk between them. Clips snap to markers, and the flags are saved
   with the project.

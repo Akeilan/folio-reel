@@ -472,6 +472,32 @@ try:
     win.run("undo")
     check(len(win.project.markers()) == 2, "and undo brings them back", win.project.markers())
 
+    # ---------------------------------------------------------------- R4-06 groups of clips
+    win.run("marker-clear")
+    vids = clips("video")
+    if len(vids) >= 2:
+        g1, g2 = vids[0], vids[1]
+        win.timeline.select([g1["id"], g2["id"]])
+        win.run("group")
+        gid = win.project.group_of(g1["id"])
+        check(gid and win.project.group_of(g2["id"]) == gid, "Group makes the selected clips one group")
+        win.timeline.select([g2["id"]])
+        check(sorted(win.timeline.selected) == sorted([g1["id"], g2["id"]]),
+              "clicking one of them picks the whole group", win.timeline.selected)
+        was = (g1["start"], g2["start"])
+        win.timeline.set_zoom(40)
+        win.timeline.show_time(0.0)
+        pump(0.1)
+        tl_click(win.timeline.x_of(g1["start"]) + 20, win.timeline.track_rect("video")[0] + 20, dx=60)
+        pump(0.2)
+        moved = win.project.clip(g1["id"])["start"] - was[0], win.project.clip(g2["id"])["start"] - was[1]
+        check(moved[0] > 0.1 and abs(moved[0] - moved[1]) < 0.01, "dragging one drags the group as one", moved)
+        win.run("undo")
+        pump(0.1)
+        win.timeline.select([g1["id"]])
+        win.run("ungroup")
+        check(win.project.group_of(g1["id"]) is None, "Ungroup breaks them up again")
+
     # ---------------------------------------------------------------- R4-08 export presets and the queue
     from folio_reel.model import EXPORT_PRESETS
     check(len(EXPORT_PRESETS) >= 4 and all(f in ("mp4", "webm") for _n, f, _s in EXPORT_PRESETS),
