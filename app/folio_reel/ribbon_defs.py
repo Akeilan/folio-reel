@@ -1,7 +1,7 @@
 """Folio Reel's ribbon: Home, Insert, Transitions, Effects, Audio and View, with KeyTips and
 ScreenTips from the suite's shared ribbon code."""
 from . import screentips
-from .model import TRANSITIONS
+from .model import EXPORT_PRESETS, TRANSITIONS
 from .ribbon import CheckControl, Group, MenuButton, RibbonButton, SplitButton, Tab
 
 
@@ -140,7 +140,11 @@ def build_ribbon(win):
         ], tip="Marker (M): mark this moment on the timeline. Clips snap to markers"),
     ])
     B.group(t, "Share", [
-        B.big("Export Video", "reel-export", "export", "E", tip="Export Video (Ctrl+E): make an MP4 or WebM file"),
+        B.big("Export Video", "reel-export", "export", "E",
+              menu=[(name, "export:%s/%s" % (fmt, size)) for name, fmt, size in EXPORT_PRESETS] +
+                   [None, ("More Export Settings…", "export")],
+              tip="Export Video (Ctrl+E): make an MP4 or WebM file. The arrow picks a preset; "
+                  "several exports wait their turn"),
     ])
     r.add_tab(t)
 

@@ -472,6 +472,31 @@ try:
     win.run("undo")
     check(len(win.project.markers()) == 2, "and undo brings them back", win.project.markers())
 
+    # ---------------------------------------------------------------- R4-08 export presets and the queue
+    from folio_reel.model import EXPORT_PRESETS
+    check(len(EXPORT_PRESETS) >= 4 and all(f in ("mp4", "webm") for _n, f, _s in EXPORT_PRESETS),
+          "there are named export presets", EXPORT_PRESETS)
+    names = [n for n, _f, _s in EXPORT_PRESETS]
+    check(len(set(names)) == len(names), "each preset has its own name")
+    # three exports: the first runs, the others wait their turn
+    outs = [os.path.join(T, "queued%d.mp4" % i) for i in range(3)]
+    e1 = win.start_export(outs[0], "mp4", "720p")
+    e2 = win.start_export(outs[1], "mp4", "720p")
+    e3 = win.start_export(outs[2], "webm", "720p")
+    check(e1 is not None and e2 is None and e3 is None, "only the first export starts")
+    check(len(win.exports) == 1 and len(win.export_queue) == 2, "the other two wait",
+          (len(win.exports), len(win.export_queue)))
+    check("waiting" in win.export_label.get_text(), "the bar says how many are waiting", win.export_label.get_text())
+    wait(lambda: not win.exports or win.exports[0].done, 60)
+    pump(0.5)
+    wait(lambda: os.path.exists(outs[1]) or len(win.export_queue) < 2, 60)
+    check(len(win.export_queue) < 2, "when the first finishes the next one starts", len(win.export_queue))
+    win.cancel_exports()
+    pump(0.5)
+    check(not win.export_queue, "Cancel empties the queue", win.export_queue)
+    wait(lambda: not win.exports, 30)
+    check(os.path.exists(outs[0]) and os.path.getsize(outs[0]) > 1000, "the first export was written")
+
     # ---------------------------------------------------------------- save and open
     proj = os.path.join(T, "My Film.reel")
     check(win.save(proj), "Save")

@@ -23,6 +23,14 @@ TRANSITIONS = [("crossfade", "Crossfade"), ("dip-black", "Fade to Black"), ("wip
                ("wipe-left", "Wipe Left"), ("wipe-down", "Wipe Down"), ("wipe-up", "Wipe Up"),
                ("box", "Box"), ("clock", "Clock"), ("iris", "Iris")]
 PRESETS = {"720p": (1280, 720), "1080p": (1920, 1080), "4k": (3840, 2160)}
+# Named export presets (R4-08): what it is called, the format, and the size.
+EXPORT_PRESETS = [
+    ("Full HD video (MP4, 1080p)", "mp4", "1080p"),
+    ("4K video (MP4)", "mp4", "4k"),
+    ("Smaller file (MP4, 720p)", "mp4", "720p"),
+    ("For the web (WebM, 1080p)", "webm", "1080p"),
+    ("For the web, smaller (WebM, 720p)", "webm", "720p"),
+]
 EPS = 1e-6
 
 
