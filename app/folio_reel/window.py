@@ -1017,6 +1017,21 @@ class ReelWindow(Gtk.ApplicationWindow):
     def cmd_full_screen(self):
         self.full_screen()
 
+    # ---------------------------------------------------------------- groups of clips (R4-06)
+    def cmd_group(self):
+        ids = [c["id"] for c in self.timeline.selected_clips()]
+        gid = self.edit(lambda p: p.group(ids))
+        if gid:
+            self.timeline.select(ids)
+            self.notice("Grouped. The clips now move and trim as one; Ungroup breaks them up again.")
+
+    def cmd_ungroup(self):
+        ids = [c["id"] for c in self.timeline.selected_clips()]
+        n = self.edit(lambda p: p.ungroup(ids))
+        if n:
+            self.timeline.select(ids)
+            self.notice("%d clips are on their own again." % n)
+
     # ---------------------------------------------------------------- markers (R4-05)
     def marker_here(self):
         """The marker at the playhead, or the nearest one within half a second."""
@@ -1511,9 +1526,9 @@ class ReelWindow(Gtk.ApplicationWindow):
             cmds = {"n": "new", "o": "open", "s": "save", "w": "close", "z": "undo", "y": "redo", "e": "export",
                     "i": "import-media", "x": "cut", "c": "copy", "v": "paste", "a": "select-all", "equal": "zoom-in",
                     "plus": "zoom-in", "kp_add": "zoom-in", "minus": "zoom-out", "kp_subtract": "zoom-out", "0": "zoom-fit",
-                    "t": "insert-title", "b": "split"}
+                    "t": "insert-title", "b": "split", "g": "group"}
             if shift:
-                cmds = {"s": "save-as", "z": "redo"}
+                cmds = {"s": "save-as", "z": "redo", "g": "ungroup"}
             if low in cmds:
                 if typing and low in ("z", "y", "x", "c", "v", "a"):
                     return False

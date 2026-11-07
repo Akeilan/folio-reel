@@ -6,7 +6,7 @@ import math
 from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo
 
 from . import model
-from .model import TRACKS, TRACK_NAMES, end_of
+from .model import EPS, TRACKS, TRACK_NAMES, end_of
 
 HEAD = 96            # track names on the left
 RULER = 26
@@ -127,7 +127,8 @@ class Timeline(Gtk.Box):
 
     # ------------------------------------------------------------ selection
     def select(self, ids):
-        self.selected = list(ids)
+        # a clip in a group brings the rest of its group with it (R4-06)
+        self.selected = self.project.expand_groups(list(ids))
         self.area.queue_draw()
         self.win.selection_changed()
 
@@ -300,6 +301,25 @@ class Timeline(Gtk.Box):
         cr.move_to(HEAD - 0.5, 0)
         cr.line_to(HEAD - 0.5, H)
         cr.stroke()
+        # a bracket over each group of clips, so it reads as one thing (R4-06)
+        groups = {}
+        for c in self.project.all_clips():
+            if c.get("group"):
+                groups.setdefault(c["group"], []).append(c)
+        for members in groups.values():
+            gx0 = self.x_of(min(m["start"] for m in members))
+            gx1 = self.x_of(max(end_of(m) for m in members))
+            if gx1 < HEAD or gx0 > W:
+                continue
+            gy = RULER + 2.5
+            cr.set_source_rgba(0.55, 0.70, 0.95, 0.95)
+            cr.set_line_width(2)
+            cr.move_to(max(gx0, HEAD), gy + 4)
+            cr.line_to(max(gx0, HEAD), gy)
+            cr.line_to(min(gx1, W), gy)
+            cr.line_to(min(gx1, W), gy + 4)
+            cr.stroke()
+
         # a marker's line down the tracks, over the lanes but under the playhead (R4-05)
         cr.set_line_width(1)
         for m in self.project.markers():
@@ -475,12 +495,21 @@ class Timeline(Gtk.Box):
         if c["id"] not in self.selected:
             self.select([c["id"]])
         x0, x1 = self.x_of(c["start"]), self.x_of(end_of(c))
+        gid = self.project.group_of(c["id"])
         if ev.x - x0 <= EDGE:
             kind = "trim-start"
         elif x1 - ev.x <= EDGE:
             kind = "trim-end"
         else:
             kind = "move"
+        if gid and kind != "move":
+            # a group trims at its own ends only; an edge inside it moves the group instead
+            members = self.project.group_members(gid)
+            outer_start = min(m["start"] for m in members)
+            outer_end = max(end_of(m) for m in members)
+            if (kind == "trim-start" and abs(c["start"] - outer_start) > EPS) or \
+               (kind == "trim-end" and abs(end_of(c) - outer_end) > EPS):
+                kind = "move"
         self.drag = {"kind": kind, "id": c["id"], "track": tr, "x": ev.x, "y": ev.y,
                      "start": c["start"], "dur": c["duration"], "moved": False}
         return True
@@ -545,7 +574,11 @@ class Timeline(Gtk.Box):
             try:
                 if d["kind"] == "move":
                     track, start = d["to"]
-                    self.project.move(d["id"], start, track=track)
+                    gid = self.project.group_of(d["id"])
+                    if gid:
+                        self.project.move_group(gid, start - d["start"])
+                    else:
+                        self.project.move(d["id"], start, track=track)
                 elif d["kind"] == "trim-start":
                     self.project.trim(d["id"], "start", d["to"])
                 else:

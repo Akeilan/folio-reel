@@ -237,6 +237,92 @@ class Project:
                 best, dist = p, abs(p - t)
         return best
 
+    # ------------------------------------------------------------ groups of clips (R4-06)
+    def group_of(self, cid):
+        """The group a clip belongs to, or None."""
+        _t, c = self.find(cid)
+        return (c or {}).get("group") or None
+
+    def group_members(self, gid):
+        """Every clip in a group, earliest first."""
+        if not gid:
+            return []
+        return sorted([c for c in self.all_clips() if c.get("group") == gid], key=lambda c: c["start"])
+
+    def expand_groups(self, ids):
+        """The given clips, plus everything grouped with them (R4-06)."""
+        out = list(ids)
+        gids = {self.group_of(i) for i in ids} - {None}
+        for g in gids:
+            for c in self.group_members(g):
+                if c["id"] not in out:
+                    out.append(c["id"])
+        return out
+
+    def group(self, ids):
+        """Make the clips one group, which moves and trims as a single clip. Returns the group id."""
+        clips = [c for c in self.all_clips() if c["id"] in ids]
+        if len(clips) < 2:
+            raise EditError("Pick two or more clips to group.")
+        self.checkpoint("Group")
+        gid = self._new_id()
+        for c in clips:
+            c["group"] = gid
+        self._changed()
+        return gid
+
+    def ungroup(self, ids):
+        """Break up every group the given clips are in. Returns how many clips were freed."""
+        gids = {self.group_of(i) for i in ids} - {None}
+        if not gids:
+            raise EditError("Those clips aren't grouped.")
+        self.checkpoint("Ungroup")
+        n = 0
+        for c in self.all_clips():
+            if c.get("group") in gids:
+                c.pop("group", None)
+                n += 1
+        self._changed()
+        return n
+
+    def move_group(self, gid, delta, tolerance=0.0, playhead=None):
+        """Slide a whole group along the timeline. Nothing moves unless every clip in it can."""
+        members = self.group_members(gid)
+        if not members:
+            raise EditError("no such group")
+        first = members[0]
+        start = max(0.0, first["start"] + delta)
+        if tolerance:
+            ids = [c["id"] for c in members]
+            last_end = max(end_of(c) for c in members)
+            extra = [playhead] if playhead is not None else []
+            s1 = self.snap(start, tolerance, exclude=ids, extra=extra)
+            s2 = self.snap(start + (last_end - first["start"]), tolerance, exclude=ids, extra=extra) - (last_end - first["start"])
+            moved = [s for s in (s1, s2) if abs(s - start) > 1e-9]
+            if moved:
+                start = min(moved, key=lambda s: abs(s - start))
+        delta = start - first["start"]
+        if abs(delta) < EPS:
+            return 0.0
+        ids = {c["id"] for c in members}
+        for c in members:
+            at = c["start"] + delta
+            if at < -EPS:
+                raise EditError("The group would run off the start of the timeline.")
+            track = self.find(c["id"])[0]
+            for x in self.data["tracks"][track]:
+                if x["id"] in ids:
+                    continue
+                if not (end_of(x) <= at + EPS or x["start"] >= at + c["duration"] - EPS):
+                    raise EditError("Something is in the way of the group there.")
+        self.checkpoint("Move group")
+        for c in members:
+            c["start"] = max(0.0, c["start"] + delta)
+        for t in TRACKS:
+            self._sort(t)
+        self._changed()
+        return delta
+
     # ------------------------------------------------------------ markers (R4-05)
     def markers(self):
         """The markers, earliest first."""
@@ -540,8 +626,11 @@ class Project:
             return []
         self.checkpoint("Paste")
         out = []
+        regroup = {}       # a pasted group is a group of its own, not the one copied from (R4-06)
         for it in sorted(items, key=lambda x: x["offset"]):
             c = copy.deepcopy(it["clip"])
+            if c.get("group"):
+                c["group"] = regroup.setdefault(c["group"], self._new_id())
             if c["kind"] == "media" and self.media_by_uri(c["media"]) is None:
                 if not it.get("media"):
                     continue

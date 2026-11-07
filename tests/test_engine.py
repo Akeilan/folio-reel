@@ -1,5 +1,6 @@
 """Folio Reel's engine: the project model (R3-01, R3-03, R3-05) and the GES timeline it becomes,
 checked by rendering and looking at the frames and the sound (R3-03..R3-06)."""
+import copy
 import os
 import shutil
 import sys
@@ -467,6 +468,47 @@ old_project = model.Project({"version": 1, "width": 1920, "height": 1080, "fps":
                              "tracks": {t: [] for t in model.TRACKS}, "next_id": 1})
 check(old_project.markers() == [] and old_project.add_marker(2.0) is not None, "a project from before markers opens fine")
 check(c["id"] is not None, "the clip is still there")
+
+# ---------------------------------------------------------------- R4-06 groups of clips
+g = model.Project()
+for k in ("red", "blue", "music"):
+    g.add_media(engine.probe(M[k]))
+ga = g.add_clip("video", g.media[0])
+gb = g.add_clip("video", g.media[1], at=model.end_of(ga) + 1.0)
+gm = g.add_clip("music", g.media[2])
+check(raises(lambda: g.group([ga["id"]])), "one clip on its own isn't a group")
+gid = g.group([ga["id"], gb["id"]])
+check(g.group_of(ga["id"]) == gid and g.group_of(gb["id"]) == gid, "two clips make a group")
+check([c["id"] for c in g.group_members(gid)] == [ga["id"], gb["id"]], "the group knows its clips")
+check(sorted(g.expand_groups([ga["id"]])) == sorted([ga["id"], gb["id"]]), "picking one picks the group")
+check(g.expand_groups([gm["id"]]) == [gm["id"]], "a clip outside a group is left alone")
+was = (ga["start"], gb["start"])
+g.move_group(gid, 2.0)
+check(close(ga["start"], was[0] + 2.0) and close(gb["start"], was[1] + 2.0), "the whole group slides along",
+      (ga["start"], gb["start"]))
+g.move_group(gid, -100.0)
+check(close(ga["start"], 0.0) and close(gb["start"], was[1] - was[0]), "and keeps its spacing at the start",
+      (ga["start"], gb["start"]))
+blocker = g.add_clip("video", g.media[0], at=model.end_of(gb) + 0.5)
+g.ungroup([blocker["id"]]) if blocker.get("group") else None
+check(raises(lambda: g.move_group(gid, (blocker["start"] - gb["start"]) + 0.2)),
+      "a group won't move on top of another clip")
+g.undo()
+check(g.group_of(ga["id"]) == gid, "undo keeps the group")
+n = g.ungroup([ga["id"]])
+check(n == 2 and g.group_of(ga["id"]) is None and g.group_of(gb["id"]) is None, "Ungroup frees them both", n)
+check(raises(lambda: g.ungroup([ga["id"]])), "and says so when there is no group")
+# a copy of a group pastes as a group of its own
+gid2 = g.group([ga["id"], gb["id"]])
+items = [{"track": "video", "clip": copy.deepcopy(ga), "offset": 0.0},
+         {"track": "video", "clip": copy.deepcopy(gb), "offset": gb["start"] - ga["start"]}]
+made = g.paste(items, 60.0)
+check(len(made) == 2 and made[0].get("group") and made[0]["group"] == made[1]["group"] and
+      made[0]["group"] != gid2, "pasted clips keep their grouping, under a new id",
+      (made[0].get("group"), gid2))
+gf = os.path.join(T, "groups.reel")
+g.save(gf)
+check(model.Project.load(gf).group_of(ga["id"]) == gid2, "groups are saved with the project")
 
 shutil.rmtree(T, ignore_errors=True)
 print("%d checks, %d failed" % (N[0], len(FAILS)))
