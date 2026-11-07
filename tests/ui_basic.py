@@ -403,6 +403,64 @@ try:
     key("Escape")
     check(not win.backstage_open(), "Esc closes File")
 
+    # ---------------------------------------------------------------- R4-05 markers
+    win.run("marker-clear")
+    win.seek(1.0)
+    pump(0.1)
+    key("m")
+    check(len(win.project.markers()) == 1 and abs(win.project.markers()[0]["t"] - 1.0) < 0.01,
+          "M puts a marker at the playhead", win.project.markers())
+    win.seek(3.0)
+    key("m")
+    check(len(win.project.markers()) == 2, "and another one further along", win.project.markers())
+    # Shift+M names it; the box is answered as a user would
+    respond("marker_dialog", Gtk.ResponseType.OK, setup=lambda d: d[1]["name"].set_text("Chorus"))
+    key("m", shift=True)
+    pump(0.2)
+    here = win.project.marker_at(3.0, 0.1)
+    check(here is not None and here["name"] == "Chorus", "Shift+M names the marker", win.project.markers())
+    # , and . walk between them
+    win.seek(0.0)
+    key("period")
+    check(abs(win.playhead - 1.0) < 0.01, "'.' goes to the next marker", win.playhead)
+    key("period")
+    check(abs(win.playhead - 3.0) < 0.01, "and on to the one after", win.playhead)
+    key("comma")
+    check(abs(win.playhead - 1.0) < 0.01, "',' goes back", win.playhead)
+    # the flag shows on the ruler, in its colour
+    win.timeline.set_zoom(60)
+    win.timeline.show_time(1.0)
+    pump(0.2)
+    img = shot("20_markers")
+    ox, oy = win.timeline.area.translate_coordinates(win, 0, 0)
+    mx = int(win.timeline.x_of(3.0))
+    seen = []
+    found = None
+    for dx in range(1, 9):
+        r, g, b = pixel(img, ox + mx + dx, oy + 18)
+        seen.append((r, g, b))
+        if r > 180 and 120 < g < 230 and b < 130:
+            found = (r, g, b)
+            break
+    check(found is not None, "the marker's flag is drawn on the ruler in yellow", seen)
+    # clicking the flag goes to it
+    win.seek(0.0)
+    pump(0.1)
+    tl_click(win.timeline.x_of(3.0) + 2, 18)
+    check(abs(win.playhead - 3.0) < 0.01, "clicking the flag goes to that marker", win.playhead)
+    check(win.notice_label.get_text() == "Chorus", "and says its name", win.notice_label.get_text())
+    # a clip snaps to a marker
+    check(3.0 in win.project.snap_points(), "clips snap to markers", win.project.snap_points()[:6])
+    # delete this one, then all of them
+    win.seek(3.0)
+    win.run("marker-delete")
+    check(len(win.project.markers()) == 1, "Delete This Marker takes one away", win.project.markers())
+    win.run("marker-clear")
+    check(win.project.markers() == [], "Delete All Markers empties the ruler")
+    win.run("undo")
+    win.run("undo")
+    check(len(win.project.markers()) == 2, "and undo brings them back", win.project.markers())
+
     # ---------------------------------------------------------------- save and open
     proj = os.path.join(T, "My Film.reel")
     check(win.save(proj), "Save")

@@ -10,6 +10,8 @@ from .model import TRACKS, TRACK_NAMES, end_of
 
 HEAD = 96            # track names on the left
 RULER = 26
+MARKER_W = 9      # the marker flag on the ruler (R4-05)
+MARKER_H = 11
 HEIGHTS = {"titles": 40, "video": 64, "audio": 46, "music": 46}
 EDGE = 6             # px at a clip's ends that trim instead of move
 SNAP_PX = 8
@@ -86,6 +88,11 @@ class Timeline(Gtk.Box):
             if c["start"] <= t <= end_of(c):
                 return tr, c
         return tr, None
+
+    def refresh(self):
+        """Draw the timeline again (after markers change, say)."""
+        self.update_range()
+        self.area.queue_draw()
 
     def update_range(self):
         w = self.area.get_allocated_width() - HEAD
@@ -229,6 +236,23 @@ class Timeline(Gtk.Box):
                 cr.stroke()
                 self._text(cr, x + 3, 4, model.fmt_time(t), 8, rgb=ink)
             t += step
+        # markers on the ruler (R4-05): a small flag with its name
+        for m in self.project.markers():
+            mx = self.x_of(m["t"])
+            if mx < HEAD - 1 or mx > W:
+                continue
+            r, g, b = model.MARKER_RGB.get(m.get("color", "yellow"), model.MARKER_RGB["yellow"])
+            cr.set_source_rgb(r, g, b)
+            cr.move_to(mx, RULER - 1)
+            cr.line_to(mx, RULER - MARKER_H)
+            cr.line_to(mx + MARKER_W, RULER - MARKER_H)
+            cr.line_to(mx + MARKER_W - 3, RULER - MARKER_H / 2 - 1)
+            cr.line_to(mx + MARKER_W, RULER - 1)
+            cr.close_path()
+            cr.fill()
+            if m.get("name"):
+                self._text(cr, mx + MARKER_W + 3, RULER - MARKER_H, m["name"], 8.5,
+                           rgb=ink, width=max(30, W - mx - MARKER_W - 6))
         # tracks
         y = RULER
         for name in TRACKS:
@@ -276,6 +300,17 @@ class Timeline(Gtk.Box):
         cr.move_to(HEAD - 0.5, 0)
         cr.line_to(HEAD - 0.5, H)
         cr.stroke()
+        # a marker's line down the tracks, over the lanes but under the playhead (R4-05)
+        cr.set_line_width(1)
+        for m in self.project.markers():
+            mx = self.x_of(m["t"])
+            if mx < HEAD or mx > W:
+                continue
+            r, g, b = model.MARKER_RGB.get(m.get("color", "yellow"), model.MARKER_RGB["yellow"])
+            cr.set_source_rgba(r, g, b, 0.45)
+            cr.move_to(int(mx) + 0.5, RULER)
+            cr.line_to(int(mx) + 0.5, H)
+            cr.stroke()
         # playhead
         x = self.x_of(self.win.playhead)
         if x >= HEAD:
@@ -381,15 +416,38 @@ class Timeline(Gtk.Box):
         cr.restore()
 
     # ------------------------------------------------------------ mouse
+    def marker_at_x(self, x, y):
+        """The marker whose flag is under a point on the ruler (R4-05)."""
+        if y >= RULER or y < RULER - MARKER_H - 2:
+            return None
+        for m in self.project.markers():
+            mx = self.x_of(m["t"])
+            if mx - 3 <= x <= mx + MARKER_W + 2:
+                return m
+        return None
+
     def _press(self, area, ev):
         area.grab_focus()
         if ev.type != Gdk.EventType.BUTTON_PRESS:
             if ev.type == Gdk.EventType._2BUTTON_PRESS:
+                # a marker's flag: name it, pick its colour or delete it
+                if self.marker_at_x(ev.x, ev.y) is not None:
+                    self.win.run("marker-rename")
+                    return True
                 tr, c = self.clip_at(ev.x, ev.y)
                 if c is not None:
                     self.win.run("clip-properties")
             return True
         if ev.y < RULER and ev.x >= HEAD:
+            m = self.marker_at_x(ev.x, ev.y)
+            if m is not None:
+                self.win.pause()
+                self.win.seek(m["t"])
+                if m.get("name"):
+                    self.win.notice(m["name"])
+                if ev.button == 3:
+                    self.win.run("marker-rename")
+                return True
             self.drag = {"kind": "scrub"}
             self.win.seek(self.t_of(ev.x))
             return True
