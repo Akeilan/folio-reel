@@ -431,13 +431,24 @@ try:
     win.timeline.set_zoom(60)
     win.timeline.show_time(1.0)
     pump(0.2)
-    img = shot("20_markers")
-    ox, oy = win.timeline.area.translate_coordinates(win, 0, 0)
+    shot("20_markers")
+    # the flag itself: the timeline drawn into a picture, so this reads the same on X and Wayland
+    import cairo
+    tw = win.timeline.area.get_allocated_width()
+    th = win.timeline.area.get_allocated_height()
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(tw, 1), max(th, 1))
+    win.timeline._draw(win.timeline.area, cairo.Context(surf))
+    data, stride = surf.get_data(), surf.get_stride()
+
+    def tl_pixel(x, y):
+        o = int(y) * stride + int(x) * 4
+        return data[o + 2], data[o + 1], data[o]
+
     mx = int(win.timeline.x_of(3.0))
     seen = []
     found = None
     for dx in range(1, 9):
-        r, g, b = pixel(img, ox + mx + dx, oy + 18)
+        r, g, b = tl_pixel(mx + dx, 18)
         seen.append((r, g, b))
         if r > 180 and 120 < g < 230 and b < 130:
             found = (r, g, b)
