@@ -45,6 +45,7 @@ REEL_TIPS = {
     "Snapping": "Clips snap to clip edges and the playhead.", "Shape of the video": "Widescreen, portrait, square or 4:3.",
     "Frame Rate": "Frames a second of the exported video.", "Shape": "Widescreen, portrait, square or 4:3.",
     "Title": "A title card at the playhead.", "Import Media": "Put video, sound and pictures in the media bin.",
+    "Marker": "Mark this moment on the timeline, to find it again and to snap clips to.",
 }
 
 
@@ -125,6 +126,18 @@ def build_ribbon(win):
         [B.small("Previous Frame", "reel-prev-frame", "frame-back", "FB", tip="Previous Frame (Left)"),
          B.small("Next Frame", "reel-next-frame", "frame-forward", "FF", tip="Next Frame (Right)"),
          B.small("Full Screen", "fullscreen", "full-screen", "FS", tip="Full-Screen Preview (F11)")],
+    ])
+    B.group(t, "Markers", [
+        B.big("Marker", "reel-marker", "marker-add", "M", menu=[
+            ("Add Marker (M)", "marker-add"),
+            ("Name This Marker (Shift+M)", "marker-rename"),
+            None,
+            ("Previous Marker (,)", "marker-prev"),
+            ("Next Marker (.)", "marker-next"),
+            None,
+            ("Delete This Marker", "marker-delete"),
+            ("Delete All Markers", "marker-clear"),
+        ], tip="Marker (M): mark this moment on the timeline. Clips snap to markers"),
     ])
     B.group(t, "Share", [
         B.big("Export Video", "reel-export", "export", "E", tip="Export Video (Ctrl+E): make an MP4 or WebM file"),

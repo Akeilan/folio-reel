@@ -12,6 +12,9 @@ what a video editor still needs (markers, nested clips, stabilisation).
   microphone straight onto the timeline.
 - **Timeline**: several tracks, drag to arrange, trim, split, ripple delete, snapping, zoom, and
   each clip's sound drawn as a waveform so a cut can be made on what you hear.
+- **Markers**: M marks this moment on the timeline, Shift+M names it and picks its colour, and
+  the comma and full stop keys walk between them. Clips snap to markers, and the flags are saved
+  with the project.
 - **Clips**: speed, volume, fade in and out, pan and zoom (Ken Burns), crop, mute, and colour
   changes — brighter, darker, contrast, black and white — with keyframes.
 - **Chroma key**: key a green or blue background out of a clip, with tolerance, softness and an

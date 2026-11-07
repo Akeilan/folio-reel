@@ -989,6 +989,101 @@ class ReelWindow(Gtk.ApplicationWindow):
     def cmd_full_screen(self):
         self.full_screen()
 
+    # ---------------------------------------------------------------- markers (R4-05)
+    def marker_here(self):
+        """The marker at the playhead, or the nearest one within half a second."""
+        return self.project.marker_at(self.playhead, max(0.5, 6.0 / max(self.timeline.pps, 1.0)))
+
+    def cmd_marker_add(self):
+        mid = self.edit(lambda p: p.add_marker(self.playhead))
+        if mid is not None:
+            self.timeline.refresh()
+            self.notice("Marker at %s. M adds one, Rename names it." % model.fmt_time(self.playhead))
+        return mid
+
+    def cmd_marker_next(self):
+        m = self.project.next_marker(self.playhead)
+        if m is None:
+            self.notice("No marker after here.")
+            return
+        self.pause()
+        self.seek(m["t"])
+        if m["name"]:
+            self.notice(m["name"])
+
+    def cmd_marker_prev(self):
+        m = self.project.prev_marker(self.playhead)
+        if m is None:
+            self.notice("No marker before here.")
+            return
+        self.pause()
+        self.seek(m["t"])
+        if m["name"]:
+            self.notice(m["name"])
+
+    def cmd_marker_delete(self):
+        m = self.marker_here()
+        if m is None:
+            self.notice("No marker at the playhead.")
+            return
+        self.edit(lambda p: p.remove_markers([m["id"]]))
+        self.timeline.refresh()
+
+    def cmd_marker_clear(self):
+        n = len(self.project.markers())
+        if not n:
+            self.notice("There are no markers.")
+            return
+        self.edit(lambda p: p.clear_markers())
+        self.timeline.refresh()
+        self.notice("%d markers deleted." % n)
+
+    def cmd_marker_rename(self, arg=None):
+        """Name a marker and pick its colour. Without a marker at the playhead, one is put there."""
+        m = self.marker_here()
+        if m is None:
+            mid = self.cmd_marker_add()
+            m = self.project.marker(mid) if mid is not None else None
+        if m is None:
+            return
+        d = Gtk.Dialog(title="Marker", transient_for=self, modal=True)
+        d.add_button("Delete", Gtk.ResponseType.REJECT)
+        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        d.add_button("OK", Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.pack_start(Gtk.Label(label="Marker at %s" % model.fmt_time(m["t"], self.project.fps), xalign=0), False, False, 0)
+        entry = Gtk.Entry()
+        entry.set_text(m.get("name", ""))
+        entry.set_width_chars(28)
+        entry.set_activates_default(True)
+        box.pack_start(entry, False, False, 0)
+        colors = Gtk.ComboBoxText()
+        keys = [k for k, _ in model.MARKER_COLORS]
+        for _k, label in model.MARKER_COLORS:
+            colors.append_text(label)
+        colors.set_active(keys.index(m.get("color", "yellow")) if m.get("color", "yellow") in keys else 0)
+        row = Gtk.Box(spacing=8)
+        row.pack_start(Gtk.Label(label="Colour:", xalign=0), False, False, 0)
+        row.pack_start(colors, False, False, 0)
+        box.pack_start(row, False, False, 0)
+        self.marker_dialog = (d, {"name": entry, "color": colors})
+        d.show_all()
+        r = d.run()
+        name, color = entry.get_text().strip(), keys[max(0, colors.get_active())]
+        d.destroy()
+        self.marker_dialog = None
+        if r == Gtk.ResponseType.REJECT:
+            self.edit(lambda p: p.remove_markers([m["id"]]))
+        elif r == Gtk.ResponseType.OK:
+            self.edit(lambda p: p.set_marker(m["id"], name=name, color=color))
+        self.timeline.refresh()
+
     # insert
     def cmd_record_screen(self):
         return self.record("screen")
@@ -1419,6 +1514,12 @@ class ReelWindow(Gtk.ApplicationWindow):
             return True
         if low == "s" and not alt:
             self.run("split")
+            return True
+        if low == "m" and not alt:                       # markers (R4-05)
+            self.run("marker-rename" if shift else "marker-add")
+            return True
+        if low in ("comma", "period") and not alt:
+            self.run("marker-prev" if low == "comma" else "marker-next")
             return True
         if low in ("delete", "backspace"):
             self.run("ripple-delete" if shift else "delete")

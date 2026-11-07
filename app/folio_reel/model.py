@@ -28,7 +28,13 @@ EPS = 1e-6
 
 def new_project(width=1920, height=1080, fps=30):
     return {"version": 1, "width": width, "height": height, "fps": fps, "media": [],
-            "tracks": {t: [] for t in TRACKS}, "next_id": 1}
+            "tracks": {t: [] for t in TRACKS}, "markers": [], "next_id": 1}
+
+
+MARKER_COLORS = [("yellow", "Yellow"), ("red", "Red"), ("green", "Green"), ("blue", "Blue"),
+                 ("purple", "Purple"), ("white", "White")]
+MARKER_RGB = {"yellow": (0.98, 0.78, 0.10), "red": (0.85, 0.20, 0.18), "green": (0.22, 0.70, 0.30),
+              "blue": (0.20, 0.52, 0.90), "purple": (0.60, 0.35, 0.85), "white": (0.95, 0.95, 0.95)}
 
 
 def clip_defaults():
@@ -53,6 +59,7 @@ class Project:
         self.data = data or new_project()
         for t in TRACKS:
             self.data["tracks"].setdefault(t, [])
+        self.data.setdefault("markers", [])      # R4-05: older projects have none
         self.path = path
         self.undo_stack = []
         self.redo_stack = []
@@ -208,6 +215,8 @@ class Project:
                 continue
             pts.add(c["start"])
             pts.add(end_of(c))
+        for m in self.data.get("markers", []):      # clips snap to markers as well (R4-05)
+            pts.add(m["t"])
         return sorted(pts)
 
     def snap(self, t, tolerance, exclude=(), extra=()):
@@ -219,6 +228,79 @@ class Project:
             if abs(p - t) <= dist:
                 best, dist = p, abs(p - t)
         return best
+
+    # ------------------------------------------------------------ markers (R4-05)
+    def markers(self):
+        """The markers, earliest first."""
+        return sorted(self.data.get("markers", []), key=lambda m: m["t"])
+
+    def marker(self, mid):
+        for m in self.data.get("markers", []):
+            if m["id"] == mid:
+                return m
+        return None
+
+    def marker_at(self, t, tolerance=0.0):
+        """The marker nearest t within tolerance, or None."""
+        best, dist = None, tolerance
+        for m in self.markers():
+            d = abs(m["t"] - t)
+            if d <= dist:
+                best, dist = m, d
+        return best
+
+    def add_marker(self, t, name="", color="yellow"):
+        """Put a marker at t. A marker already there is renamed rather than doubled up."""
+        t = max(0.0, float(t))
+        here = self.marker_at(t, EPS)
+        if here is not None:
+            if name:
+                self.set_marker(here["id"], name=name, color=color)
+            return here["id"]
+        self.checkpoint("Add marker")
+        m = {"id": self._new_id(), "t": t, "name": name, "color": color if color in MARKER_RGB else "yellow"}
+        self.data.setdefault("markers", []).append(m)
+        self._changed()
+        return m["id"]
+
+    def set_marker(self, mid, label="Change marker", **props):
+        m = self.marker(mid)
+        if m is None:
+            return False
+        if all(m.get(k) == v for k, v in props.items()):
+            return True
+        self.checkpoint(label)
+        for k, v in props.items():
+            if k == "t":
+                v = max(0.0, float(v))
+            m[k] = v
+        self._changed()
+        return True
+
+    def remove_markers(self, ids):
+        ids = [i for i in ids if self.marker(i) is not None]
+        if not ids:
+            return 0
+        self.checkpoint("Delete marker" if len(ids) == 1 else "Delete markers")
+        self.data["markers"] = [m for m in self.data.get("markers", []) if m["id"] not in ids]
+        self._changed()
+        return len(ids)
+
+    def clear_markers(self):
+        return self.remove_markers([m["id"] for m in self.markers()])
+
+    def next_marker(self, t):
+        """The first marker after t, or None."""
+        for m in self.markers():
+            if m["t"] > t + EPS:
+                return m
+        return None
+
+    def prev_marker(self, t):
+        for m in reversed(self.markers()):
+            if m["t"] < t - EPS:
+                return m
+        return None
 
     # ------------------------------------------------------------ making clips
     def _new_id(self):
