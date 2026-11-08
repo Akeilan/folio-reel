@@ -1,16 +1,17 @@
 Package: folio-reel
-Version: 0.9.0
+Version: 0.10.0
 Section: video
 Priority: optional
 Architecture: all
 Installed-Size: 3000
 Depends: python3 (>= 3.10), python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gir1.2-ges-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-gtk3, gstreamer1.0-x, librsvg2-common, libx11-6
-Recommends: gstreamer1.0-pulseaudio | gstreamer1.0-pipewire, gstreamer1.0-pipewire, xdg-desktop-portal, xdg-utils
+Recommends: gstreamer1.0-pulseaudio | gstreamer1.0-pipewire, gstreamer1.0-pipewire, xdg-desktop-portal, xdg-utils, ffmpeg
 Maintainer: Ron Shillings <ron.shillings@gmail.com>
 Description: ribbon video editor
  Folio Reel is a video editor with a ribbon interface, KeyTips and ScreenTips:
  a media bin, a timeline with titles, video, audio and music tracks, trimming,
  splitting and ripple delete with snapping, crossfades and wipes, colour,
- speed, crop and pan-and-zoom, titles and captions, a music bed that dips
- under speech, voice-over, screen and camera recording, and MP4 or WebM
- export at 720p, 1080p and 4K. Everything stays on this computer.
+ speed, crop and pan-and-zoom, steadying a shaky clip and straightening a
+ bent lens, titles and captions, a music bed that dips under speech,
+ voice-over, screen and camera recording, and MP4 or WebM export at 720p,
+ 1080p and 4K. Everything stays on this computer.

@@ -249,6 +249,37 @@ class ClipSettings(Gtk.Box):
             for k, lab in (("l", "Crop left %"), ("r", "Crop right %"), ("t", "Crop top %"), ("b", "Crop bottom %")):
                 self._row(box, lab, self._spin("crop_" + k, 0, 45, 1, cr.get(k, 0) * 100,
                                                lambda v, k=k: self._set("Crop", crop={k: v / 100.0}), 0))
+            # ---- steadying and straightening (R4-07)
+            if not m.get("is_image"):
+                self._section(box, "Steady and straighten")
+                st = Gtk.CheckButton(label="Take the shake out")
+                st.set_active(c.get("steady", False))
+                st.connect("toggled", lambda b: self._quiet or self._set("Steady", steady=b.get_active()))
+                self.controls["steady"] = st
+                box.pack_start(st, False, False, 0)
+                self._row(box, "How much", self._scale("steady_amount", 1, 10, 1, c.get("steady_amount", 5),
+                                                       lambda v: "%.0f" % v,
+                                                       lambda v: self._set("Steady Amount", steady_amount=int(v))))
+                self._row(box, "Straighten", self._scale("lens", -100, 100, 5, c.get("lens", 0.0) * 100,
+                                                         lambda v: "%+.0f" % v,
+                                                         lambda v: self._set("Straighten", lens=round(v) / 100.0)))
+                ap = Gtk.Button(label="Render the corrected copy")
+                ap.connect("clicked", lambda _b: self.win.run("steady-apply"))
+                self.controls["steady_apply"] = ap
+                box.pack_start(ap, False, False, 0)
+                hint = Gtk.Label(xalign=0)
+                hint.get_style_context().add_class("reel-hint")
+                hint.set_line_wrap(True)
+                hint.set_max_width_chars(30)
+                hint.set_text("Steadying has to watch the whole clip and straightening bends every "
+                              "pixel, so Reel renders a corrected copy of the file once. The preview "
+                              "and any export then use that copy. Change a setting and render again.")
+                self.controls["steady_hint"] = hint
+                box.pack_start(hint, False, False, 0)
+                ready = Gtk.Label(xalign=0)
+                ready.get_style_context().add_class("reel-hint")
+                self.controls["steady_ready"] = ready
+                box.pack_start(ready, False, False, 0)
         # ---- transition into the clip
         if track in ("video", "titles") and p.neighbours(c["id"])[0] is not None:
             self._section(box, "Transition from the clip before")
@@ -306,5 +337,26 @@ class ClipSettings(Gtk.Box):
                 w = self.controls.get(k)
                 if w is not None and abs(w.get_value() - float(c.get(k, d))) > 1e-6:
                     w.set_value(float(c.get(k, d)))
+            w = self.controls.get("steady")
+            if w is not None:
+                w.set_active(c.get("steady", False))
+            w = self.controls.get("steady_amount")
+            if w is not None and abs(w.get_value() - float(c.get("steady_amount", 5))) > 1e-6:
+                w.set_value(float(c.get("steady_amount", 5)))
+            w = self.controls.get("lens")
+            if w is not None and abs(w.get_value() - c.get("lens", 0.0) * 100) > 0.5:
+                w.set_value(c.get("lens", 0.0) * 100)
+            w = self.controls.get("steady_ready")
+            if w is not None:
+                from . import engine
+                want = engine.fix_settings(c)
+                if want is None:
+                    w.set_text("")
+                elif engine.fixed_copy(c["media"], c) is not None:
+                    w.set_text("The corrected copy is ready.")
+                elif not engine.have_ffmpeg():
+                    w.set_text("ffmpeg isn\u2019t installed, so this clip can\u2019t be corrected.")
+                else:
+                    w.set_text("Not rendered yet: this clip still plays as it was filmed.")
         finally:
             self._quiet = False

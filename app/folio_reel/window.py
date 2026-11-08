@@ -1235,6 +1235,114 @@ class ReelWindow(Gtk.ApplicationWindow):
         self.notice("%d small cop%s removed." % (n, "y" if n == 1 else "ies"))
         return n
 
+    def _reshow(self):
+        """The media behind a clip changed under us (a corrected copy appeared or went): build the
+        preview again and redraw."""
+        self._refresh_preview()
+        self._after_seek()
+
+    # steadying and straightening (R4-07)
+    def _fixed(self, c):
+        """Whether the clip, as it now stands, already has its corrected copy."""
+        from . import engine
+        cur = self.project.clip(c["id"]) or c
+        return engine.fix_settings(cur) is None or engine.fixed_copy(cur["media"], cur) is not None
+
+    def cmd_steady(self, arg="toggle"):
+        """Take the shake out of the selected video clips."""
+        sel = self.sel_or_say("a video clip", kinds=("media",))
+        if not sel:
+            return 0
+        on = arg in ("on", "1", "true", "yes") if arg != "toggle" else not all(c.get("steady") for c in sel)
+        for c in sel:
+            self.edit(lambda p, c=c: p.set(c["id"], label="Steady", steady=on))
+        if not on:
+            self.notice("Steadying off; the clips play as they were filmed.")
+            self._reshow()
+            return 0
+        if all(self._fixed(c) for c in sel):
+            self.notice("Steadying on; the corrected copies are already made.")
+            self._reshow()
+        else:
+            self.notice("Steadying on. Choose Render Correction to make the corrected copy.")
+        return 1
+
+    def cmd_lens(self, arg="0"):
+        """Straighten the lens on the selected video clips: -100 to 100."""
+        sel = self.sel_or_say("a video clip", kinds=("media",))
+        if not sel:
+            return 0
+        try:
+            v = max(-100.0, min(100.0, float(arg))) / 100.0
+        except ValueError:
+            self.notice("Straighten takes a number from -100 to 100.")
+            return 0
+        for c in sel:
+            self.edit(lambda p, c=c: p.set(c["id"], label="Straighten", lens=v))
+        if abs(v) < 1e-6:
+            self.notice("Straightening off; the clips play as they were filmed.")
+            self._reshow()
+            return 0
+        if all(self._fixed(c) for c in sel):
+            self.notice("Straightening set; the corrected copies are already made.")
+            self._reshow()
+        else:
+            self.notice("Straightening set. Choose Render Correction to make the corrected copy.")
+        return 1
+
+    def cmd_steady_apply(self, arg=None):
+        """Render the corrected copies the selected clips ask for. Reel edits those copies from
+        here on, in the preview and in any export."""
+        from . import engine
+        sel = self.sel_or_say("a video clip", kinds=("media",))
+        if not sel:
+            return 0
+        want = []
+        for c in sel:
+            m = self.project.media_by_uri(c["media"])
+            st = engine.fix_settings(c)
+            if st is None or m is None or not m.get("has_video") or m.get("is_image"):
+                continue
+            if engine.fixed_copy(c["media"], c) is None:
+                want.append((c, m, st))
+        if not want:
+            if any(engine.fix_settings(c) for c in sel):
+                self.notice("Those are ready; the preview plays the corrected copies.")
+                self._reshow()
+            else:
+                self.notice("Turn on Steady or move Straighten first.")
+            return 0
+        if not engine.have_ffmpeg():
+            self.notice(engine.FFMPEG_MISSING, seconds=20)
+            return 0
+        done = 0
+        for i, (c, m, st) in enumerate(want):
+            self.notice("Correcting %d of %d (%s)\u2026" % (i + 1, len(want), c["name"]))
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+            def progress(f, i=i, c=c):
+                self.notice("Correcting %d of %d (%s): %d%%" % (i + 1, len(want), c["name"], int(f * 100)))
+                while Gtk.events_pending():
+                    Gtk.main_iteration_do(False)
+            if engine.make_fix(m, st, on_progress=progress):
+                done += 1
+        if done:
+            self.notice("%d clip%s corrected; the preview plays the corrected copies."
+                        % (done, "" if done == 1 else "s"))
+            self._reshow()
+        else:
+            self.notice("The corrected copies couldn\u2019t be made.")
+        return done
+
+    def cmd_remove_fixes(self):
+        """Throw the corrected copies away; the clips play as they were filmed again."""
+        from . import engine
+        n = engine.forget_fixes()
+        self._reshow()
+        self.notice("%d corrected cop%s removed." % (n, "y" if n == 1 else "ies"))
+        return n
+
     # subtitles (R4-03)
     def cmd_import_subtitles(self, path=None):
         """Read an .srt into caption clips on the Titles track."""

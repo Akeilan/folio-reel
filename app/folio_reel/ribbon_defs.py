@@ -93,6 +93,9 @@ VOLUMES = [("Mute (0%)", "volume:0"), ("25%", "volume:0.25"), ("50%", "volume:0.
 DURATIONS = [("0.25 s", "transition-duration:0.25"), ("0.5 s", "transition-duration:0.5"),
              ("1 s", "transition-duration:1"), ("1.5 s", "transition-duration:1.5"), ("2 s", "transition-duration:2")]
 FADES = [("None", "%s:0"), ("0.5 s", "%s:0.5"), ("1 s", "%s:1"), ("2 s", "%s:2"), ("3 s", "%s:3")]
+STRAIGHTEN = [("Straight (none)", "lens:0"), ("Bulge: a little", "lens:30"), ("Bulge: more", "lens:60"),
+              ("Bulge: most", "lens:100"), ("Pinch: a little", "lens:-30"), ("Pinch: more", "lens:-60"),
+              ("Pinch: most", "lens:-100")]
 
 
 def build_ribbon(win):
@@ -226,6 +229,16 @@ def build_ribbon(win):
     B.group(t, "Fade", [
         [B.small("Fade In", "reel-fadein", None, "FI", menu=[(l, c % "fade-in") for l, c in FADES], tip="Fade In from black"),
          B.small("Fade Out", "reel-fadeout", None, "FO", menu=[(l, c % "fade-out") for l, c in FADES], tip="Fade Out to black")],
+    ])
+    B.group(t, "Steady", [
+        B.big("Steady", "reel-aspect", "steady", "SD",
+              tip="Steady: take the shake out of the selected clip"),
+        [B.small("Straighten", "reel-panzoom", None, "SR", menu=STRAIGHTEN,
+                 tip="Straighten: take the bulge or the pinch out of the lens"),
+         B.small("Render Correction", "reel-export", "steady-apply", "SA",
+                 tip="Render Correction: make the corrected copy the selected clip asks for"),
+         B.small("Remove Corrections", "reel-reset", "remove-fixes", "SX",
+                 tip="Remove Corrections: throw the corrected copies away")],
     ])
     r.add_tab(t)
 

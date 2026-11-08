@@ -4,7 +4,7 @@ A straightforward video editor for Zorin OS and Ubuntu: put clips on a timeline,
 titles and music, and make a file. Part of Folio Studio.
 
 It is the newest app in the suite and the least finished. What is here works; Backlog 4 lists
-what a video editor still needs (markers, nested clips, stabilisation).
+what a video editor still needs.
 
 ## What it does
 
@@ -21,6 +21,9 @@ what a video editor still needs (markers, nested clips, stabilisation).
   changes — brighter, darker, contrast, black and white — with keyframes.
 - **Chroma key**: key a green or blue background out of a clip, with tolerance, softness and an
   edge setting, so what is under it on the timeline shows through.
+- **Steady and straighten**: take the shake out of a hand-held clip, and take the bulge or the
+  pinch out of a wide or a long lens. Both have to look at the whole clip, so Reel renders a
+  corrected copy of the file once with ffmpeg and edits that; the preview and every export use it.
 - **Between clips**: transitions with a duration you choose.
 - **Text**: titles, captions and lower thirds.
 - **Subtitles**: import an .srt and it becomes captions on the Titles track, trimmed and styled
@@ -48,9 +51,11 @@ what a video editor still needs (markers, nested clips, stabilisation).
 cd app && python3 -m folio_reel         # run it
 python3 tests/test_engine.py            # the engine
 sh tests/run_ui.sh ui_basic.py          # the interface, on an X display
+sh tests/run_ui.sh ui_steady.py         # steadying and straightening (R4-07)
 sh tests/theme_run.sh                   # desktop themes (X2-01)
 sh build-deb.sh out/                    # the package
 XD=95 tools/release.sh                  # everything, on the three test machines
 ```
 
-Needs python3-gi, GTK 3 and GStreamer (base, good, bad, libav).
+Needs python3-gi, GTK 3 and GStreamer (base, good, bad, libav). Steadying and straightening
+also need ffmpeg; without it Reel says so and leaves the clip alone.

@@ -51,7 +51,8 @@ def clip_defaults():
             "crop": {"l": 0.0, "r": 0.0, "t": 0.0, "b": 0.0}, "zoom": 1.0, "panzoom": None,
             "transition": None, "music_bed": False, "keyframes": [], "muted": False,
             "chroma": False, "chroma_color": "green", "chroma_tolerance": 20.0,
-            "chroma_softness": 2.0, "chroma_edges": 100}
+            "chroma_softness": 2.0, "chroma_edges": 100,
+            "steady": False, "steady_amount": 5, "lens": 0.0}
 
 
 def end_of(c):
