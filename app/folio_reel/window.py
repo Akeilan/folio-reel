@@ -16,6 +16,7 @@ MEDIA_TYPES = ["video/*", "audio/*", "image/*"]
 ASPECTS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080), "4:3": (1440, 1080)}
 SHUTTLE = [1, 2, 4, 8]
 SCRUB_MS = 70        # the shortest gap between pictures while the playhead is being dragged (R5-01)
+PROXY_HINT_WIDTH = 1280      # wider than this and small copies are worth mentioning (R5-03)
 
 
 class ReelWindow(Gtk.ApplicationWindow):
@@ -35,6 +36,7 @@ class ReelWindow(Gtk.ApplicationWindow):
         self._seek_target = None
         self._seek_id = None
         self.picture_dialog = None
+        self._said_proxies = False
         self._own_change = False
         self._alt_alone = False
         self.exports = []
@@ -688,7 +690,24 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.notice("Couldn't import: " + "; ".join(bad), 15)
         elif out:
             self.notice("Imported %d file%s." % (len(out), "" if len(out) == 1 else "s"))
+            self._mention_proxies(out)
         return out
+
+    def _mention_proxies(self, media):
+        """Big films play back heavily until there are small copies to preview from. Say so once a
+        window, and only when there is nothing already made (R5-03)."""
+        if self._said_proxies or self.app.settings.get("use_proxies", False):
+            return
+        big = [m for m in media if m.get("has_video") and not m.get("is_image")
+               and (m.get("width") or 0) > PROXY_HINT_WIDTH
+               and not os.path.exists(engine.proxy_path(m["uri"]))]
+        if not big:
+            return
+        self._said_proxies = True
+        self.notice("%s %dx%d. Make Small Copies, on the Insert tab, gives a smoother preview; an "
+                    "export always uses the original." % (
+                        "%s is" % big[0]["name"] if len(big) == 1 else "%d of those films are" % len(big),
+                        big[0].get("width") or 0, big[0].get("height") or 0), 18)
 
     def add_media_to_timeline(self, uris, track=None, at=None):
         added = []

@@ -135,6 +135,24 @@ try:
           "and leaves it where it was dropped",
           (len(win2.project.track("audio")), len(win2.project.track("video"))))
 
+    # ------------------------------------------------ big films: a word about small copies (R5-03)
+    win3 = win2.run("new")
+    pump(0.6)
+    big = os.path.join(T, "big.mp4")
+    mkmedia.video(big, "smpte", 2, 440, w=1920, h=1080)
+    win3.import_uris([_model.path_to_uri(MEDIA["red"])])
+    pump(0.4)
+    check("Small Copies" not in win3.notice_label.get_text(),
+          "a small film gets no word about small copies", win3.notice_label.get_text())
+    win3.import_uris([_model.path_to_uri(big)])
+    pump(0.4)
+    txt = win3.notice_label.get_text()
+    check("1920x1080" in txt and "Small Copies" in txt, "a big one does, with its size in it", txt)
+    win3.import_uris([_model.path_to_uri(big)])
+    pump(0.4)
+    check("Small Copies" not in win3.notice_label.get_text(),
+          "and it is said once, not at every import", win3.notice_label.get_text())
+
     # ------------------------------------------------ a normal film gets no warning at all
     win2.add_uris([URI["blue"]], track="video")
     settle()
