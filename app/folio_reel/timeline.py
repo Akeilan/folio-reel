@@ -14,6 +14,9 @@ MARKER_W = 9      # the marker flag on the ruler (R4-05)
 MARKER_H = 11
 HEIGHTS = {"titles": 40, "video": 64, "audio": 46, "music": 46}
 EDGE = 6             # px at a clip's ends that trim instead of move
+GRAB = 5             # px either side of the playhead that grab it, over anything underneath
+EDGE_SCROLL = 56     # px at the ends of the view where a drag carries the view along (R5-01)
+SCROLL_RATE = 460    # px a second the view travels while a drag sits right at the edge
 SNAP_PX = 8
 COLORS = {"titles": (0.48, 0.36, 0.66), "video": (0.22, 0.36, 0.60), "audio": (0.24, 0.55, 0.36),
           "music": (0.18, 0.52, 0.54)}
@@ -27,6 +30,8 @@ class Timeline(Gtk.Box):
         self.pps = 40.0                  # pixels per second
         self.selected = []               # clip ids
         self.drag = None
+        self._scroll_id = None           # the view travelling under a held drag (R5-01)
+        self._scrolling = False
         self.ghost = None                # (track, start, duration) while dragging
         self.snap_line = None
         self.thumbs = {}
@@ -116,11 +121,22 @@ class Timeline(Gtk.Box):
         self.area.queue_draw()
 
     def show_time(self, t):
-        """Scroll so time t is in view (the playhead while playing)."""
+        """Scroll so time t is in view (the playhead while playing). While a drag is going on the
+        view belongs to the drag: jumping it here would yank the timeline out from under the
+        pointer, and the playhead would leap away instead of following it (R5-01)."""
+        if self.drag is not None:
+            return
         x = t * self.pps
         v, w = self.adj.get_value(), self.adj.get_page_size()
         if x < v or x > v + w - 30:
             self.adj.set_value(max(0, x - w * 0.2))
+
+    def centre_on(self, t):
+        """Scroll so time t sits in the middle of the view: where the playhead should land after a
+        jump to a time somewhere else in a long film (R5-01)."""
+        w = self.adj.get_page_size()
+        self.adj.set_value(max(0.0, min(max(0.0, self.adj.get_upper() - w), t * self.pps - w / 2)))
+        self.area.queue_draw()
 
     def snap_tolerance(self):
         return SNAP_PX / self.pps
@@ -339,9 +355,12 @@ class Timeline(Gtk.Box):
             cr.move_to(x, 0)
             cr.line_to(x, H)
             cr.stroke()
-            cr.move_to(x - 6, 0)
-            cr.line_to(x + 6, 0)
-            cr.line_to(x, 8)
+            # a grab tab at the top, wide enough to aim at (R5-01)
+            cr.move_to(x - 7, 0)
+            cr.line_to(x + 7, 0)
+            cr.line_to(x + 7, 7)
+            cr.line_to(x, 13)
+            cr.line_to(x - 7, 7)
             cr.close_path()
             cr.fill()
 
@@ -446,6 +465,11 @@ class Timeline(Gtk.Box):
                 return m
         return None
 
+    def on_playhead(self, x, y):
+        """True where a press lands on the playhead itself: the red bar is draggable all the way
+        down the tracks, over clips as well as between them (R5-01)."""
+        return y >= RULER and abs(x - self.x_of(self.win.playhead)) <= GRAB
+
     def _press(self, area, ev):
         area.grab_focus()
         if ev.type != Gdk.EventType.BUTTON_PRESS:
@@ -468,6 +492,10 @@ class Timeline(Gtk.Box):
                 if ev.button == 3:
                     self.win.run("marker-rename")
                 return True
+            self.drag = {"kind": "scrub"}
+            self.win.seek(self.t_of(ev.x))
+            return True
+        if ev.button == 1 and self.on_playhead(ev.x, ev.y):
             self.drag = {"kind": "scrub"}
             self.win.seek(self.t_of(ev.x))
             return True
@@ -511,7 +539,7 @@ class Timeline(Gtk.Box):
                (kind == "trim-end" and abs(end_of(c) - outer_end) > EPS):
                 kind = "move"
         self.drag = {"kind": kind, "id": c["id"], "track": tr, "x": ev.x, "y": ev.y,
-                     "start": c["start"], "dur": c["duration"], "moved": False}
+                     "t0": self.t_of(ev.x), "start": c["start"], "dur": c["duration"], "moved": False}
         return True
 
     def _motion(self, area, ev):
@@ -519,7 +547,9 @@ class Timeline(Gtk.Box):
         if d is None:
             tr, c = self.clip_at(ev.x, ev.y)
             cur = None
-            if c is not None:
+            if self.on_playhead(ev.x, ev.y) or (ev.y < RULER and ev.x >= HEAD):
+                cur = "col-resize"
+            elif c is not None:
                 x0, x1 = self.x_of(c["start"]), self.x_of(end_of(c))
                 if ev.x - x0 <= EDGE or x1 - ev.x <= EDGE:
                     cur = "col-resize"
@@ -527,19 +557,94 @@ class Timeline(Gtk.Box):
             if win is not None:
                 win.set_cursor(Gdk.Cursor.new_from_name(area.get_display(), cur) if cur else None)
             return False
-        if d["kind"] == "scrub":
-            self.win.seek(self.t_of(ev.x))
+        d["x_now"], d["y_now"] = ev.x, ev.y
+        self._start_auto_scroll()
+        return self._drag_to(ev.x, ev.y)
+
+    # -------------------------------------------------- carrying the view along with a drag (R5-01)
+    def _edge_step(self, x):
+        """How far the view should travel this tick for a drag held at x: nothing in the middle,
+        more the further past the edge of the view the pointer is."""
+        w = self.area.get_allocated_width()
+        if x > w - EDGE_SCROLL:
+            f = min(1.0, (x - (w - EDGE_SCROLL)) / EDGE_SCROLL)
+        elif x < HEAD + EDGE_SCROLL:
+            f = -min(1.0, ((HEAD + EDGE_SCROLL) - x) / EDGE_SCROLL)
+        else:
+            return 0.0
+        # gentle where the band begins, quick at the very edge: fine aim near the end of the view,
+        # and a long film still passes by quickly when the pointer is pressed right up against it
+        return f * abs(f)
+
+    def _start_auto_scroll(self):
+        if self._scroll_id is None and self.drag is not None and self._edge_step(self.drag.get("x_now", 0)) != 0.0:
+            self.drag["scrolled_at"] = GLib.get_monotonic_time()
+            self._scroll_id = GLib.timeout_add(20, self._auto_scroll)
+
+    def auto_scroll_tick(self):
+        """One tick of the view travelling under a held drag. True while there is further to go."""
+        if self._scrolling:          # a tick already in hand: never stack them up
             return True
-        if abs(ev.x - d["x"]) < 3 and abs(ev.y - d["y"]) < 3 and not d["moved"]:
+        d = self.drag
+        if d is None:
+            return False
+        x = d.get("x_now")
+        if x is None:
+            return False
+        fraction = self._edge_step(x)
+        if fraction == 0.0:
+            return False
+        now = GLib.get_monotonic_time()
+        elapsed = min(0.2, max(0.0, (now - d.get("scrolled_at", now)) / 1e6))
+        d["scrolled_at"] = now
+        step = fraction * SCROLL_RATE * elapsed
+        if step == 0.0:
+            return True
+        v = self.adj.get_value()
+        nv = max(0.0, min(max(0.0, self.adj.get_upper() - self.adj.get_page_size()), v + step))
+        if abs(nv - v) < 1e-9:
+            return False
+        self._scrolling = True
+        try:
+            self.adj.set_value(nv)
+            self._drag_to(x, d.get("y_now", RULER + 1))
+        finally:
+            self._scrolling = False
+        return True
+
+    def _stop_auto_scroll(self):
+        if self._scroll_id is not None:
+            try:
+                GLib.source_remove(self._scroll_id)
+            except (ValueError, TypeError):      # it finished of its own accord
+                pass
+            self._scroll_id = None
+
+    def _auto_scroll(self):
+        going = self.auto_scroll_tick()
+        if not going:
+            self._scroll_id = None
+        return going
+
+    def _drag_to(self, x, y):
+        """Carry the drag to a point on the timeline. The pointer's own position does the work, so
+        this is the same whether the pointer moved or the view did (R5-01)."""
+        d = self.drag
+        if d is None:
+            return False
+        if d["kind"] == "scrub":
+            self.win.seek(self.t_of(x), accurate=False)
+            return True
+        if abs(x - d["x"]) < 3 and abs(y - d["y"]) < 3 and not d["moved"]:
             return True
         d["moved"] = True
-        dt = (ev.x - d["x"]) / self.pps
+        dt = self.t_of(x) - d["t0"]
         tol = self.snap_tolerance()
         p = self.project
         extra = [self.win.playhead]
         self.snap_line = None
         if d["kind"] == "move":
-            track = self.track_at(ev.y) or d["track"]
+            track = self.track_at(y) or d["track"]
             start = max(0.0, d["start"] + dt)
             if p.snapping:
                 s1 = p.snap(start, tol, exclude=(d["id"],), extra=extra)
@@ -568,6 +673,9 @@ class Timeline(Gtk.Box):
 
     def _release(self, area, ev):
         d, self.drag = self.drag, None
+        self._stop_auto_scroll()
+        if d is not None and d["kind"] == "scrub":
+            self.win.seek(self.win.playhead)        # the exact frame, now the dragging has stopped
         self.ghost = None
         self.snap_line = None
         if d and d.get("moved") and "to" in d:

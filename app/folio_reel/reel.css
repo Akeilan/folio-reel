@@ -35,3 +35,4 @@
 .reel-props scrollbar slider, .reel-bin scrollbar slider, .reel-timeline scrollbar slider { background: #a0a0a0; border: none; }
 .reel-bin button { background: transparent; background-image: none; border: none; box-shadow: none; }
 .reel-bin button:hover { background: #e1e1e1; }
+.reel-warning { color: #8a4b00; }

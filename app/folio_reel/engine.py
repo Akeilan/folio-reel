@@ -109,6 +109,57 @@ def thumbnail(info, t=None, width=160):
     return pb
 
 
+# ------------------------------------------------- looking at the film that came out (R5-02)
+# Average brightness, 0..255, at or below which a frame has nothing to look at. Black is 0 in a
+# full-range film and 16 in a studio-range one — both are black to the eye, so the line sits above
+# both, well under the 49 that the first real picture of a dark scene reads.
+DARK = 18.0
+
+
+def brightness_at(uri, times, width=32, height=18):
+    """The average brightness, 0..255, of the film at each of `times` seconds. None where a frame
+    couldn't be read. One pipeline, seeking to each point: cheap even on a long film."""
+    init()
+    pipe = Gst.parse_launch(
+        "uridecodebin uri=%s ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=%d,height=%d,"
+        "pixel-aspect-ratio=1/1 ! appsink name=sink" % (uri, width, height))
+    sink = pipe.get_by_name("sink")
+    stride = (width + 3) // 4 * 4
+    out = []
+    try:
+        pipe.set_state(Gst.State.PAUSED)
+        if pipe.get_state(10 * SECOND)[0] == Gst.StateChangeReturn.FAILURE:
+            return [None] * len(times)
+        for t in times:
+            val = None
+            if pipe.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, ns(max(0.0, t))):
+                pipe.get_state(10 * SECOND)
+                sample = sink.emit("pull-preroll")
+                if sample is not None:
+                    buf = sample.get_buffer()
+                    ok, mi = buf.map(Gst.MapFlags.READ)
+                    if ok:
+                        d = bytes(mi.data)
+                        buf.unmap(mi)
+                        val = sum(sum(d[y * stride:y * stride + width]) for y in range(height)) / (width * height)
+            out.append(val)
+    finally:
+        pipe.set_state(Gst.State.NULL)
+    return out
+
+
+def look_at_film(path, duration, points=9):
+    """Look at a film that has just been rendered: (how many points were read, how many of those had
+    nothing to look at). Reel checks its own work this way, so an export with no picture in it says
+    so instead of being handed over as if it were fine (R5-02)."""
+    if not os.path.exists(path) or duration <= 0:
+        return (0, 0)
+    step = duration / (points + 1.0)
+    times = [step * (i + 1) for i in range(points)]
+    vals = [v for v in brightness_at(model.path_to_uri(path), times) if v is not None]
+    return (len(vals), sum(1 for v in vals if v <= DARK))
+
+
 _assets = {}
 
 

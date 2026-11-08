@@ -143,3 +143,46 @@ def media_duration(path):
 
 
 _ = GLib
+
+
+def brightness(path, w=32, h=18):
+    """[(t, mean 0..255)] for every frame of a film, in one decoding pass. An export that came out
+    black reads 0 all the way: the cheap way to prove a render has a visible picture."""
+    p = Gst.parse_launch("filesrc location=\"%s\" ! decodebin ! videoconvert ! videoscale "
+                         "! video/x-raw,format=GRAY8,width=%d,height=%d ! appsink name=s sync=false" % (path, w, h))
+    s = p.get_by_name("s")
+    p.set_state(Gst.State.PLAYING)
+    stride = (w + 3) // 4 * 4
+    out = []
+    while True:
+        sample = s.emit("try-pull-sample", 10 * SECOND)
+        if sample is None:
+            break
+        buf = sample.get_buffer()
+        ok, mi = buf.map(Gst.MapFlags.READ)
+        if ok:
+            d = bytes(mi.data)
+            tot = sum(sum(d[y * stride:y * stride + w]) for y in range(h))
+            out.append((buf.pts / SECOND, tot / (w * h)))
+            buf.unmap(mi)
+    p.set_state(Gst.State.NULL)
+    return out
+
+
+def dark_span(path, floor=18.0):
+    """The longest run of frames darker than `floor`, in seconds, and the film's own length. A film
+    that is black from end to end gives back its whole length. Black reads 0 in a full-range film and 16
+    in a studio-range one, so the floor sits above both."""
+    b = brightness(path)
+    if not b:
+        return (0.0, 0.0)
+    worst = run = 0.0
+    prev = b[0][0]
+    for t, v in b:
+        if v < floor:
+            run += max(0.0, t - prev)
+            worst = max(worst, run)
+        else:
+            run = 0.0
+        prev = t
+    return (worst, b[-1][0])
