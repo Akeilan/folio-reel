@@ -834,8 +834,9 @@ class ReelWindow(Gtk.ApplicationWindow):
             name = os.path.basename(path)
             read, dark = engine.look_at_film(path, getattr(ex, "duration", 0) / engine.SECOND)
             if read and dark == read:
-                self.notice("Exported %s — but there is no picture in it, only sound." % name, 30)
-                GLib.idle_add(self._no_picture_dialog, name)      # not from inside the render's own callback
+                # the status bar, not a box in the way: a person who meant to render a black film
+                # has already said so at the question before the render started
+                self.notice("Exported %s — every frame of it is black." % name, 30)
             elif read and dark > read / 2:
                 self.notice("Exported %s — most of it is black." % name, 30)
             else:
@@ -844,19 +845,6 @@ class ReelWindow(Gtk.ApplicationWindow):
             self._next_export()
         elif not self.exports:
             self.export_box.hide()
-
-    def _no_picture_dialog(self, name):
-        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
-                              buttons=Gtk.ButtonsType.OK, text="%s has no picture in it." % name)
-        d.set_title(APP_NAME)
-        d.format_secondary_text("Reel looked at the film it made and every frame is black. The sound is"
-                                " there. Check that the clips you want to see are on the Video track —"
-                                " a clip on a sound track keeps its sound and loses its picture.")
-        self.picture_dialog = d
-        d.run()
-        d.destroy()
-        self.picture_dialog = None
-        return False
 
     def cancel_exports(self):
         """Stop what is running and empty the queue (R4-08)."""

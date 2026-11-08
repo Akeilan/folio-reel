@@ -154,6 +154,37 @@ try:
     check(abs(c0["start"] - start0) < 1e-6 and abs(c0["duration"] - dur0) < 1e-6,
           "and leaves the clip under it alone", (c0["start"], c0["duration"]))
 
+    # a clip's own end still wins: after a split the bar sits right on the new edge, and trimming
+    # there has to keep working
+    win.seek(c0["start"] + c0["duration"] / 2)
+    win.timeline.select([c0["id"]])
+    settle()
+    win.run("split")
+    settle()
+    parts = clips("video")
+    edge = win.playhead
+    frame = 1.0 / win.project.fps
+    near = [c for c in parts if abs(c["start"] - edge) <= frame + 1e-6]
+    check(len(parts) > 2 and near, "a split leaves a clip edge right under the bar",
+          (len(parts), edge, [round(c["start"], 3) for c in parts]))
+    later = near[0]
+    edge = later["start"]
+    lid, ldur = later["id"], later["duration"]
+    ex = t.x_of(edge)
+    check(t.on_playhead(ex, t.track_rect("video")[0] + 10), "the bar is there")
+    y2, h2 = t.track_rect("video")
+    press(ex + 1, y2 + h2 / 2)
+    check(t.drag is not None and t.drag["kind"] == "trim-start",
+          "pressing on that edge trims the clip, not the bar",
+          t.drag["kind"] if t.drag else None)
+    motion(ex + 41, y2 + h2 / 2)
+    release(ex + 41, y2 + h2 / 2)
+    check(win.project.clip(lid)["duration"] < ldur - 0.5, "and the trim takes",
+          (ldur, win.project.clip(lid)["duration"]))
+    win.run("undo")
+    win.run("undo")
+    settle()
+
     # ------------------------------------------------- a clip drag can reach beyond the view too
     t.adj.set_value(0.0)
     settle()

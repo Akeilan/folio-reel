@@ -470,6 +470,12 @@ class Timeline(Gtk.Box):
         down the tracks, over clips as well as between them (R5-01)."""
         return y >= RULER and abs(x - self.x_of(self.win.playhead)) <= GRAB
 
+    def _on_clip_edge(self, c, x):
+        """True where x is close enough to one of clip c's ends to trim it."""
+        if c is None:
+            return False
+        return abs(x - self.x_of(c["start"])) <= EDGE or abs(x - self.x_of(end_of(c))) <= EDGE
+
     def _press(self, area, ev):
         area.grab_focus()
         if ev.type != Gdk.EventType.BUTTON_PRESS:
@@ -495,11 +501,13 @@ class Timeline(Gtk.Box):
             self.drag = {"kind": "scrub"}
             self.win.seek(self.t_of(ev.x))
             return True
-        if ev.button == 1 and self.on_playhead(ev.x, ev.y):
+        tr, c = self.clip_at(ev.x, ev.y)
+        if ev.button == 1 and self.on_playhead(ev.x, ev.y) and not self._on_clip_edge(c, ev.x):
+            # the bar wins over the body of a clip, but a clip's own end wins over the bar: after a
+            # split the two sit on top of each other, and trimming there must still be possible
             self.drag = {"kind": "scrub"}
             self.win.seek(self.t_of(ev.x))
             return True
-        tr, c = self.clip_at(ev.x, ev.y)
         if ev.button == 3:
             if c is not None and c["id"] not in self.selected:
                 self.select([c["id"]])
