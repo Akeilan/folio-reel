@@ -299,6 +299,183 @@ def forget_waves():
     _waves.clear()
 
 
+# ------------------------------------------- steadying and straightening (R4-07)
+# Taking the shake out of a clip means looking at the whole thing before deciding how far to move
+# each frame, and straightening a bent lens bends every pixel: neither is something GStreamer can
+# do while it plays. So Reel renders a corrected copy of the media once, with ffmpeg, and edits
+# that instead. The copy lives in the cache under a name made from the settings, so asking for the
+# same correction again is instant, and changing a setting makes a new one rather than using a
+# stale copy. Without ffmpeg Reel says so and leaves the clip alone.
+LENS_MAX = 0.9                      # the full slider, as ffmpeg lenscorrection's k1
+STEADY_MIN, STEADY_MAX = 1, 10
+FFMPEG_MISSING = ("Steadying and straightening need ffmpeg, which isn\u2019t installed on this "
+                  "computer. Install the ffmpeg package and try again.")
+
+
+def ffmpeg_path():
+    """Where ffmpeg is, or None."""
+    for d in (os.environ.get("PATH") or "/usr/bin:/bin").split(os.pathsep):
+        p = os.path.join(d, "ffmpeg")
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def have_ffmpeg():
+    return ffmpeg_path() is not None
+
+
+def fix_settings(c):
+    """(steady, amount, lens) this clip wants, or None if it wants neither."""
+    steady = bool(c.get("steady"))
+    try:
+        lens = float(c.get("lens", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        lens = 0.0
+    lens = round(max(-1.0, min(1.0, lens)), 3)
+    if not steady and abs(lens) < 1e-6:
+        return None
+    try:
+        amount = int(round(float(c.get("steady_amount", 5))))
+    except (TypeError, ValueError):
+        amount = 5
+    return (steady, max(STEADY_MIN, min(STEADY_MAX, amount)), lens)
+
+
+def fix_dir():
+    d = os.path.join(GLib.get_user_cache_dir(), "folio-reel", "fixed")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def fix_path(uri, settings):
+    """Where the corrected copy of this media with these settings lives."""
+    import hashlib
+    steady, amount, lens = settings
+    path = model.uri_to_path(uri) or uri
+    try:
+        st = os.stat(path)
+        stamp = "%d-%d" % (st.st_size, int(st.st_mtime))
+    except OSError:
+        stamp = "0-0"
+    key = hashlib.sha1(("%s|%s|%d|%d|%.3f" % (uri, stamp, 1 if steady else 0, amount, lens)).encode()).hexdigest()[:16]
+    return os.path.join(fix_dir(), "%s.mp4" % key)
+
+
+def lens_filter(lens):
+    """ffmpeg's straightening. Positive takes the bulge out of a wide lens (barrel), negative
+    takes the pinch out of a long one (pincushion)."""
+    return "lenscorrection=k1=%.4f:k2=0:i=bilinear" % (lens * LENS_MAX)
+
+
+def steady_filters(amount, trf):
+    """(the pass that looks, the pass that moves). amount 1..10: how much shake to take out."""
+    a = max(STEADY_MIN, min(STEADY_MAX, int(amount)))
+    smoothing = int(round(5 + a * 2.5))        # frames either side the camera path is averaged over
+    return ("vidstabdetect=shakiness=%d:accuracy=15:result=%s" % (a, trf),
+            "vidstabtransform=input=%s:smoothing=%d:optzoom=1:interpol=bilinear" % (trf, smoothing))
+
+
+def _ffmpeg_run(args, duration, on_progress, stop, timeout, base=0.0, span=1.0):
+    """Run ffmpeg, reporting how far through it is. True if it finished."""
+    import subprocess
+    p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    end = time.time() + timeout
+    try:
+        for line in p.stdout:
+            if stop and stop():
+                p.terminate()
+                return False
+            if time.time() > end:
+                p.terminate()
+                return False
+            if on_progress is not None and line.startswith("out_time_ms=") and duration > 0:
+                try:
+                    done = int(line.split("=", 1)[1]) / 1000000.0 / duration
+                except ValueError:
+                    continue
+                on_progress(min(1.0, base + span * max(0.0, min(1.0, done))))
+    finally:
+        try:
+            p.stdout.close()
+        except OSError:
+            pass
+    try:
+        return p.wait(timeout=30) == 0
+    except Exception:       # noqa: BLE001
+        p.kill()
+        return False
+
+
+def make_fix(info, settings, on_progress=None, stop=None, timeout=3600):
+    """The corrected copy of this media. Returns its path, or None if it has no picture, ffmpeg
+    isn\u2019t there or the copy couldn\u2019t be made. An existing copy is used as it is."""
+    if not info.get("has_video") or info.get("is_image") or settings is None:
+        return None
+    exe = ffmpeg_path()
+    if exe is None:
+        return None
+    out = fix_path(info["uri"], settings)
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        if on_progress is not None:
+            on_progress(1.0)
+        return out
+    src = model.uri_to_path(info["uri"])
+    if not src or not os.path.exists(src):
+        return None
+    steady, amount, lens = settings
+    dur = float(info.get("duration") or 0)
+    part = out + ".part"
+    trf = out + ".trf"
+    chain = []
+    ok = True
+    if steady:
+        look, move = steady_filters(amount, trf)
+        ok = _ffmpeg_run([exe, "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1",
+                          "-i", src, "-vf", look, "-an", "-f", "null", "-"],
+                         dur, on_progress, stop, timeout, 0.0, 0.5)
+        chain.append(move)
+    if ok and abs(lens) > 1e-6:
+        chain.append(lens_filter(lens))
+    chain.append("format=yuv420p")
+    if ok:
+        ok = _ffmpeg_run([exe, "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1",
+                          "-i", src, "-vf", ",".join(chain), "-c:v", "libx264", "-preset", "veryfast",
+                          "-crf", "20", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+                          "-f", "mp4", part],
+                         dur, on_progress, stop, timeout, 0.5 if steady else 0.0, 0.5 if steady else 1.0)
+    for f in (trf,):
+        if os.path.exists(f):
+            os.remove(f)
+    if ok and os.path.exists(part) and os.path.getsize(part) > 0:
+        os.replace(part, out)
+        if on_progress is not None:
+            on_progress(1.0)
+        return out
+    if os.path.exists(part):
+        os.remove(part)
+    return None
+
+
+def fixed_copy(uri, c):
+    """The corrected copy to play for this clip, if one has been made, else None."""
+    want = fix_settings(c)
+    if want is None:
+        return None
+    p = fix_path(uri, want)
+    return p if os.path.exists(p) and os.path.getsize(p) > 0 else None
+
+
+def forget_fixes():
+    """Throw the corrected copies away (they are rendered again when asked for)."""
+    import shutil
+    d = os.path.join(GLib.get_user_cache_dir(), "folio-reel", "fixed")
+    n = len([f for f in os.listdir(d) if f.endswith(".mp4")]) if os.path.isdir(d) else 0
+    shutil.rmtree(d, ignore_errors=True)
+    return n
+
+
 def asset(uri):
     a = _assets.get(uri)
     if a is None:
@@ -530,7 +707,11 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
         if media is None or not os.path.exists(model.uri_to_path(c["media"]) or ""):
             return None
         uri = c["media"]
-        if proxies and media.get("has_video") and not media.get("is_image"):
+        fixed = fixed_copy(uri, c) if track in ("video", "titles") else None
+        if fixed is not None:
+            # steadied, straightened, or both (R4-07): that copy is the film now, so no small copy
+            uri = GLib.filename_to_uri(fixed, None)
+        elif proxies and media.get("has_video") and not media.get("is_image"):
             # the small copy, where one has been made: same film, fewer pixels to push (R4-04)
             pp = proxy_path(uri)
             if os.path.exists(pp):
