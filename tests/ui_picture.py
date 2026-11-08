@@ -113,22 +113,15 @@ try:
 
     # an export with no picture says so when it is done
     out = os.path.join(T, "silent film.mp4")
-    # the warning comes up on its own once the render is done: have the answer waiting for it
-    seen_dialog = [False]
-
-    def shut(d):
-        seen_dialog[0] = True
-    answer(win2, "picture_dialog", Gtk.ResponseType.OK, delay=250, setup=shut)
     ex = win2.start_export(out, "mp4", "720p")
     check(ex is not None, "sound-only exports do run if that is what you want")
     ok = wait(lambda: ex.done, 240)
     check(ok and ex.error is None and os.path.exists(out), "the file is made", ex.error)
-    wait(lambda: seen_dialog[0], 30)
-    check(seen_dialog[0], "Reel puts up a warning about the film it just made")
-    check("no picture in it" in win2.notice_label.get_text(),
-          "and says so in the status bar too", win2.notice_label.get_text())
-    pump(0.4)
-    check(win2.picture_dialog is None, "and the warning has been dealt with")
+    pump(0.6)
+    check("every frame of it is black" in win2.notice_label.get_text(),
+          "Reel says the film it made came out black", win2.notice_label.get_text())
+    check(win2.picture_dialog is None,
+          "and does not put a box in the way: the question before the render already asked")
     if os.path.exists(out):
         read, dark = engine.look_at_film(out, win2.project.duration())
         check(read >= 5 and dark == read, "which is the truth: the film is black", (read, dark))
