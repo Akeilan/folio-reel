@@ -160,6 +160,17 @@ class Backstage(Gtk.Box):
         note.get_style_context().add_class("dim-label")
         note.set_margin_top(8)
         self.body.pack_start(note, False, False, 0)
+        # what the film's picture is missing, before a single frame is rendered (R5-02)
+        said = self.win.picture_warnings()
+        self.picture_note = None
+        if said:
+            warn = Gtk.Label(label=" ".join(said), xalign=0)
+            warn.set_line_wrap(True)
+            warn.set_max_width_chars(64)
+            warn.get_style_context().add_class("reel-warning")
+            warn.set_margin_top(8)
+            self.picture_note = warn
+            self.body.pack_start(warn, False, False, 0)
         go = Gtk.Button(label="Export…")
         go.get_style_context().add_class("suggested-action")
         go.set_halign(Gtk.Align.START)

@@ -15,6 +15,7 @@ from .timeline import Timeline
 MEDIA_TYPES = ["video/*", "audio/*", "image/*"]
 ASPECTS = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080), "4:3": (1440, 1080)}
 SHUTTLE = [1, 2, 4, 8]
+SCRUB_MS = 70        # the shortest gap between pictures while the playhead is being dragged (R5-01)
 
 
 class ReelWindow(Gtk.ApplicationWindow):
@@ -32,6 +33,8 @@ class ReelWindow(Gtk.ApplicationWindow):
         self._tick_id = None
         self._refresh_id = None
         self._seek_target = None
+        self._seek_id = None
+        self.picture_dialog = None
         self._own_change = False
         self._alt_alone = False
         self.exports = []
@@ -137,7 +140,15 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.transport[key] = b
         self.timecode = Gtk.Label(label="00:00:00:00")
         self.timecode.get_style_context().add_class("reel-timecode")
-        bar.pack_start(self.timecode, False, False, 6)
+        # click the timecode to jump somewhere by typing the time (R5-01)
+        tcbox = Gtk.EventBox()
+        tcbox.add(self.timecode)
+        tcbox.set_tooltip_text("Go to Time (Ctrl+J)")
+        tcbox.connect("button-press-event", lambda w, e: (self.run("go-to-time"), False)[1])
+        tcbox.connect("realize", lambda w: w.get_window().set_cursor(
+            Gdk.Cursor.new_from_name(w.get_display(), "pointer")))
+        self.timecode_box = tcbox
+        bar.pack_start(tcbox, False, False, 6)
         # the output level while it plays (R4-01)
         self.levels = [0.0, 0.0]
         self.level_hold = [0.0, 0.0]
@@ -364,16 +375,23 @@ class ReelWindow(Gtk.ApplicationWindow):
                 self.clear_level()
 
     def seek(self, t, accurate=True):
-        """Move the playhead. Seeks are gathered up so dragging the playhead never queues a backlog."""
+        """Move the playhead. The bar, the timecode and the timeline keep up with every move; the
+        picture is fetched a few times a second while the playhead is being dragged, which is what
+        makes dragging it along a long film stay under the pointer instead of falling behind
+        (R5-01). An accurate seek, the kind a click or a jump asks for, is served at once."""
         t = max(0.0, min(float(t), max(0.0, self.project.duration())))
         self.playhead = t
         self._after_seek()
-        first = self._seek_target is None
         self._seek_target = (t, accurate)
-        if first:
-            GLib.idle_add(self._do_seek)
+        if accurate and self._seek_id is not None:
+            GLib.source_remove(self._seek_id)
+            self._seek_id = None
+        if self._seek_id is None:
+            self._seek_id = (GLib.idle_add(self._do_seek) if accurate
+                             else GLib.timeout_add(SCRUB_MS, self._do_seek))
 
     def _do_seek(self):
+        self._seek_id = None
         target, self._seek_target = self._seek_target, None
         if target is not None and self.preview is not None:
             self.preview.seek(*target)
@@ -397,6 +415,9 @@ class ReelWindow(Gtk.ApplicationWindow):
             return
         self._stop_shuttle_timer()
         if self._seek_target is not None:
+            if self._seek_id is not None:
+                GLib.source_remove(self._seek_id)
+                self._seek_id = None
             self._do_seek()
         if self.playhead >= self.project.duration() - 0.05:
             self.preview.seek(0.0)
@@ -683,6 +704,10 @@ class ReelWindow(Gtk.ApplicationWindow):
             c = self.edit(lambda p: p.add_clip(tr, m, at=self.playhead if at is None else at))
             if c is not None:
                 added.append(c["id"])
+                if tr in ("audio", "music") and (m.get("has_video") or m.get("is_image")):
+                    # easy to aim a lane low: say so rather than quietly dropping the picture (R5-02)
+                    self.notice("“%s” is on the %s track: its sound is in the film, its picture isn't."
+                                % (m["name"], model.TRACK_NAMES[tr]), 12)
         if added:
             self.timeline.select(added)
         return added
@@ -702,6 +727,8 @@ class ReelWindow(Gtk.ApplicationWindow):
         if self.project.duration() <= 0:
             self.message("There's nothing on the timeline to export.")
             return None
+        if not self.confirm_picture():
+            return None
         self.app.settings["export_format"], self.app.settings["export_preset"] = fmt, preset
         ext = ".webm" if fmt == "webm" else ".mp4"
         fc = self._chooser("Export Video", Gtk.FileChooserAction.SAVE, os.path.splitext(self.doc_name())[0] + ext,
@@ -714,6 +741,46 @@ class ReelWindow(Gtk.ApplicationWindow):
         if not path.lower().endswith(ext):
             path += ext
         return self.start_export(path, fmt, preset)
+
+    def picture_warnings(self):
+        """What a person should be told about this film's picture before it is rendered, in plain
+        words. Empty when there is nothing to say (R5-02)."""
+        total = self.project.duration()
+        if total <= 0:
+            return []
+        dark = self.project.dark_spans()
+        if not dark:
+            return []
+        said = []
+        covered = sum(b - a for a, b in dark)
+        if covered > total - 0.25:
+            said.append("This film has no picture at all — it would come out black from end to end."
+                        " Put a video clip or a picture on the Video track.")
+        elif len(dark) == 1 and dark[0][1] > total - 0.25:
+            said.append("The last %s of this film has no picture: it would come out black there."
+                        % model.fmt_time(dark[0][1] - dark[0][0]))
+        else:
+            said.append("%s of this film has no picture and would come out black%s."
+                        % (model.fmt_time(covered), ", starting at %s" % model.fmt_time(dark[0][0])
+                           if dark[0][0] > 0.25 else ""))
+        return said
+
+    def confirm_picture(self):
+        """Ask before rendering a film that would be black. True to carry on (R5-02)."""
+        said = self.picture_warnings()
+        if not said:
+            return True
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                              text="Export this film anyway?")
+        d.format_secondary_text(" ".join(said))
+        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        d.add_button("Export Anyway", Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.OK)
+        self.picture_dialog = d
+        r = d.run()
+        d.destroy()
+        self.picture_dialog = None
+        return r == Gtk.ResponseType.OK
 
     def start_export(self, path, fmt, preset):
         """Put an export in the queue. One runs at a time; the rest wait their turn (R4-08)."""
@@ -764,11 +831,32 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.notice("Export failed: %s" % err, 20)
         else:
             left = len(self.export_queue)
-            self.notice("Exported %s.%s" % (os.path.basename(path), " %d still to go." % left if left else ""), 20)
+            name = os.path.basename(path)
+            read, dark = engine.look_at_film(path, getattr(ex, "duration", 0) / engine.SECOND)
+            if read and dark == read:
+                self.notice("Exported %s — but there is no picture in it, only sound." % name, 30)
+                GLib.idle_add(self._no_picture_dialog, name)      # not from inside the render's own callback
+            elif read and dark > read / 2:
+                self.notice("Exported %s — most of it is black." % name, 30)
+            else:
+                self.notice("Exported %s.%s" % (name, " %d still to go." % left if left else ""), 20)
         if self.export_queue:
             self._next_export()
         elif not self.exports:
             self.export_box.hide()
+
+    def _no_picture_dialog(self, name):
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                              buttons=Gtk.ButtonsType.OK, text="%s has no picture in it." % name)
+        d.set_title(APP_NAME)
+        d.format_secondary_text("Reel looked at the film it made and every frame is black. The sound is"
+                                " there. Check that the clips you want to see are on the Video track —"
+                                " a clip on a sound track keeps its sound and loses its picture.")
+        self.picture_dialog = d
+        d.run()
+        d.destroy()
+        self.picture_dialog = None
+        return False
 
     def cancel_exports(self):
         """Stop what is running and empty the queue (R4-08)."""
@@ -1013,6 +1101,50 @@ class ReelWindow(Gtk.ApplicationWindow):
     def cmd_go_end(self):
         self.pause()
         self.seek(self.project.duration())
+
+    def cmd_go_to_time(self, arg=None):
+        """Jump the playhead to a time the person types: the way to reach the middle of a long film
+        without dragging all the way there (R5-01). go-to-time:90 goes straight there."""
+        if arg:
+            t = model.parse_time(arg, self.project.fps)
+            if t is not None:
+                self.pause()
+                self.seek(t)
+                self.timeline.centre_on(t)
+            return t
+        d = Gtk.Dialog(title="Go to Time", transient_for=self, modal=True)
+        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        d.add_button("Go", Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_spacing(8)
+        for m in ("set_margin_start", "set_margin_end", "set_margin_top", "set_margin_bottom"):
+            getattr(box, m)(12)
+        box.pack_start(Gtk.Label(label="Time in the film (minutes:seconds, or hours:minutes:seconds):", xalign=0),
+                       False, False, 0)
+        entry = Gtk.Entry()
+        entry.set_text(model.fmt_time(self.playhead, self.project.fps))
+        entry.set_width_chars(16)
+        entry.set_activates_default(True)
+        box.pack_start(entry, False, False, 0)
+        box.pack_start(Gtk.Label(label="This film runs to %s." % model.fmt_time(self.project.duration(), self.project.fps),
+                                 xalign=0), False, False, 0)
+        self.time_dialog = (d, entry)
+        d.show_all()
+        r = d.run()
+        text = entry.get_text()
+        d.destroy()
+        self.time_dialog = None
+        if r != Gtk.ResponseType.OK:
+            return None
+        t = model.parse_time(text, self.project.fps)
+        if t is None:
+            self.notice("“%s” isn't a time." % text.strip())
+            return None
+        self.pause()
+        self.seek(t)
+        self.timeline.centre_on(t)
+        return t
 
     def cmd_full_screen(self):
         self.full_screen()
@@ -1634,7 +1766,7 @@ class ReelWindow(Gtk.ApplicationWindow):
             cmds = {"n": "new", "o": "open", "s": "save", "w": "close", "z": "undo", "y": "redo", "e": "export",
                     "i": "import-media", "x": "cut", "c": "copy", "v": "paste", "a": "select-all", "equal": "zoom-in",
                     "plus": "zoom-in", "kp_add": "zoom-in", "minus": "zoom-out", "kp_subtract": "zoom-out", "0": "zoom-fit",
-                    "t": "insert-title", "b": "split", "g": "group"}
+                    "t": "insert-title", "b": "split", "g": "group", "j": "go-to-time"}
             if shift:
                 cmds = {"s": "save-as", "z": "redo", "g": "ungroup"}
             if low in cmds:

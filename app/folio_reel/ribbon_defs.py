@@ -275,7 +275,10 @@ def build_ribbon(win):
     snap = CheckControl(r, "Snapping", "snapping", active=True, state="snapping", keytip="SN",
                         tooltip=_tip("Snapping", "Snapping: clips snap to clip edges and the playhead"))
     win.snap_check = snap
-    B.group(t, "Timeline", [[snap]])
+    B.group(t, "Timeline", [
+        [snap],
+        [B.small("Go to Time", "reel-goto", "go-to-time", "GT", tip="Go to Time: type where in the film to go (Ctrl+J)")],
+    ])
     B.group(t, "Project", [
         B.big("Shape", "reel-aspect", None, "SH",
               menu=[("Widescreen 16:9", "aspect:16:9"), ("Portrait 9:16", "aspect:9:16"), ("Square 1:1", "aspect:1:1"),

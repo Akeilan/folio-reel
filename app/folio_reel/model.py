@@ -202,6 +202,52 @@ class Project:
     def duration(self):
         return max([end_of(c) for c in self.all_clips()] + [0.0])
 
+    def picture_spans(self):
+        """[(from, to)] of the film that has something to look at: a clip on the Video or Titles
+        track that is not itself invisible. Overlapping clips are merged into one span (R5-02)."""
+        spans = []
+        for name in ("video", "titles"):
+            for c in self.track(name):
+                if self.clip_shows_nothing(c):
+                    continue
+                spans.append((c["start"], end_of(c)))
+        spans.sort()
+        out = []
+        for a, b in spans:
+            if out and a <= out[-1][1] + EPS:
+                out[-1] = (out[-1][0], max(out[-1][1], b))
+            else:
+                out.append((a, b))
+        return out
+
+    @staticmethod
+    def clip_shows_nothing(c):
+        """True for a clip that draws nothing you could see: turned all the way down to black, or
+        a title with no words and nothing behind them (R5-02)."""
+        col = c.get("color") or {}
+        if col.get("brightness", 0.0) <= -0.99 or col.get("contrast", 1.0) <= 0.0:
+            return True
+        if c["kind"] != "media" and not (c.get("text") or "").strip():
+            bg = (c.get("bg_color") or "#ff000000").lstrip("#")
+            if len(bg) == 8 and int(bg[:2], 16) == 0:
+                return True
+        return False
+
+    def dark_spans(self, floor=0.25):
+        """[(from, to)] of the film with nothing to look at, longer than `floor` seconds: the film
+        would be black there. The film's own length bounds it (R5-02)."""
+        total = self.duration()
+        if total <= 0:
+            return []
+        out, at = [], 0.0
+        for a, b in self.picture_spans():
+            if a > at + floor:
+                out.append((at, a))
+            at = max(at, b)
+        if total > at + floor:
+            out.append((at, total))
+        return out
+
     def clips_at(self, t):
         return [c for c in self.all_clips() if c["start"] - EPS <= t < end_of(c) - EPS]
 
@@ -854,6 +900,28 @@ def uri_to_path(uri):
 def path_to_uri(path):
     from urllib.parse import quote
     return "file://" + quote(os.path.abspath(path))
+
+
+def parse_time(text, fps=None):
+    """A time the person typed, as seconds, or None. Takes "12", "1:30", "1:02:03" and the
+    timecode's own "0:01:30:12" (hours:minutes:seconds:frames), with or without the frames (R5-01)."""
+    t = (text or "").strip().replace(";", ":").replace(",", ".")
+    if not t:
+        return None
+    parts = t.split(":")
+    if len(parts) > 4:
+        return None
+    try:
+        if len(parts) == 4:
+            h, m, sec, f = parts
+            return int(h) * 3600 + int(m) * 60 + int(sec) + (float(f) / (fps or 25))
+        nums = [float(x) for x in parts]
+    except ValueError:
+        return None
+    secs = 0.0
+    for n in nums:
+        secs = secs * 60 + n
+    return max(0.0, secs)
 
 
 def fmt_time(secs, frames_fps=None):
