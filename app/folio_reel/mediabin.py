@@ -108,8 +108,19 @@ class MediaBin(Gtk.Box):
 
     def _drag_get(self, view, ctx, data, info, time):
         data.set_uris(self.selected_uris())
+        return True
 
     def _press(self, view, ev):
+        if ev.button == 1:
+            # pressing a thumbnail picks it, so dragging it to the timeline carries that one: the
+            # drag hands over whatever is selected, and before this an unselected thumbnail
+            # dragged nothing at all (R5-06)
+            path = view.get_path_at_pos(int(ev.x), int(ev.y))
+            if path is not None and not view.path_is_selected(path) \
+                    and not (ev.state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.CONTROL_MASK)):
+                view.unselect_all()
+                view.select_path(path)
+            return False
         if ev.button != 3:
             return False
         path = view.get_path_at_pos(int(ev.x), int(ev.y))

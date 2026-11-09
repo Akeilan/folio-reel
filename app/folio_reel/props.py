@@ -174,12 +174,31 @@ class ClipSettings(Gtk.Box):
             self._row(box, "Speed", self._combo("speed", ["%g×" % s for s in SPEEDS], idx,
                                                 lambda i: self.win.edit(lambda p: p.set_speed(self.cid, SPEEDS[i]))))
         # ---- sound (R3-05)
-        has_sound = m is not None and m.get("has_audio")
+        has_sound = m is not None and m.get("has_audio") and not c.get("sound_elsewhere")
+        if c.get("sound_elsewhere"):
+            # its sound is a clip of its own on a sound track (R5-05): the controls are over there
+            self._section(box, "Sound")
+            snd = p.sound_partner(self.cid)
+            lab = Gtk.Label(xalign=0, label="This clip's sound is its own clip on the %s track, at the "
+                            "same time and grouped with the picture.%s" % (
+                                model.TRACK_NAMES[p.find(snd["id"])[0]] if snd else "Audio",
+                                "" if snd else " It isn't there any more."))
+            lab.set_line_wrap(True)
+            lab.set_max_width_chars(34)
+            lab.get_style_context().add_class("dim-label" if snd else "reel-warning")
+            box.pack_start(lab, False, False, 0)
         if has_sound:
             self._section(box, "Sound")
             self._row(box, "Volume", self._scale("volume", 0, 200, 5, c.get("volume", 1.0) * 100,
                                                  lambda v: "%d%%" % v,
                                                  lambda v: self._set("Volume", volume=round(v) / 100.0)))
+            if abs(c.get("speed", 1.0) - 1.0) > 1e-6:
+                kp = Gtk.CheckButton(label="Keep the pitch (a little less exact in time)")
+                kp.set_active(c.get("keep_pitch", False))
+                kp.connect("toggled", lambda b: self._quiet or self._set("Keep the Pitch",
+                                                                         keep_pitch=b.get_active()))
+                self.controls["keep_pitch"] = kp
+                box.pack_start(kp, False, False, 0)
             mute = Gtk.CheckButton(label="Mute")
             mute.set_active(c.get("muted", False))
             mute.connect("toggled", lambda b: self._quiet or self._set("Mute", muted=b.get_active()))
@@ -316,6 +335,9 @@ class ClipSettings(Gtk.Box):
             w = self.controls.get("volume")
             if w is not None and abs(w.get_value() - c.get("volume", 1.0) * 100) > 0.5:
                 w.set_value(c.get("volume", 1.0) * 100)
+            w = self.controls.get("keep_pitch")
+            if w is not None:
+                w.set_active(c.get("keep_pitch", False))
             w = self.controls.get("muted")
             if w is not None:
                 w.set_active(c.get("muted", False))

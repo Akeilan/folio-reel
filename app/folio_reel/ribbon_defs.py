@@ -275,8 +275,15 @@ def build_ribbon(win):
     snap = CheckControl(r, "Snapping", "snapping", active=True, state="snapping", keytip="SN",
                         tooltip=_tip("Snapping", "Snapping: clips snap to clip edges and the playhead"))
     win.snap_check = snap
+    split = CheckControl(r, "Sound on its own track", "split-sound", active=win.split_sound(),
+                         state="split-sound", keytip="SS",
+                         tooltip=_tip("Sound on its own track",
+                                      "A clip added to the Video track puts its own sound on the Audio "
+                                      "track, at the same time and grouped with the picture"))
+    win.split_check = split
     B.group(t, "Timeline", [
         [snap],
+        [split],
         [B.small("Go to Time", "reel-goto", "go-to-time", "GT", tip="Go to Time: type where in the film to go (Ctrl+J)")],
     ])
     B.group(t, "Project", [

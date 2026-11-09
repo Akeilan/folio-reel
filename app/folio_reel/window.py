@@ -709,8 +709,12 @@ class ReelWindow(Gtk.ApplicationWindow):
                         "%s is" % big[0]["name"] if len(big) == 1 else "%d of those films are" % len(big),
                         big[0].get("width") or 0, big[0].get("height") or 0), 18)
 
+    def split_sound(self):
+        """Whether a clip's own sound is put on the Audio track as its own clip (R5-05)."""
+        return bool(self.app.settings.get("split_sound", True))
+
     def add_media_to_timeline(self, uris, track=None, at=None):
-        added = []
+        added, kept = [], []
         for uri in uris:
             m = self.project.media_by_uri(uri)
             if m is None:
@@ -720,16 +724,43 @@ class ReelWindow(Gtk.ApplicationWindow):
                 tr = self.project.media_kind_track(m)
             if tr in ("video", "titles") and not (m.get("has_video") or m.get("is_image")):
                 tr = "audio"
-            c = self.edit(lambda p: p.add_clip(tr, m, at=self.playhead if at is None else at))
+            where = self.playhead if at is None else at
+            snd = None
+            if (tr in ("video", "titles") and self.split_sound() and m.get("has_video")
+                    and m.get("has_audio") and not m.get("is_image")):
+                got = self.edit(lambda p: p.add_media_split(tr, m, at=where))
+                c, snd = got if got else (None, None)
+                if c is not None and snd is None:
+                    kept.append(m["name"])
+            else:
+                c = self.edit(lambda p: p.add_clip(tr, m, at=where))
             if c is not None:
                 added.append(c["id"])
+                if snd is not None:
+                    added.append(snd["id"])
                 if tr in ("audio", "music") and (m.get("has_video") or m.get("is_image")):
                     # easy to aim a lane low: say so rather than quietly dropping the picture (R5-02)
                     self.notice("“%s” is on the %s track: its sound is in the film, its picture isn't."
                                 % (m["name"], model.TRACK_NAMES[tr]), 12)
+        if kept:
+            self.notice("%s kept its own sound: the sound tracks were busy at that time."
+                        % ("“%s”" % kept[0] if len(kept) == 1 else "%d clips" % len(kept)), 14)
         if added:
             self.timeline.select(added)
+            self.check_sound_in_step()
         return added
+
+    def check_sound_in_step(self):
+        """The check the sound split asks for: every picture still has its own sound under it, at
+        the same time and for the same length. Says so when one has slipped (R5-05)."""
+        off = self.project.out_of_step()
+        if not off:
+            return True
+        c, snd = off[0]
+        self.notice("“%s” and its sound no longer line up: the picture runs %s from %s, the sound %s "
+                    "from %s." % (c["name"], model.fmt_time(c["duration"]), model.fmt_time(c["start"]),
+                                  model.fmt_time(snd["duration"]), model.fmt_time(snd["start"])), 20)
+        return False
 
     def add_uris(self, uris, track=None, at=None):
         """Files or bin media dropped on the timeline."""
@@ -784,9 +815,21 @@ class ReelWindow(Gtk.ApplicationWindow):
                            if dark[0][0] > 0.25 else ""))
         return said
 
+    def sound_warnings(self):
+        """What to say about sound that has slipped out of step with its picture (R5-05)."""
+        off = self.project.out_of_step()
+        if not off:
+            return []
+        c, snd = off[0]
+        more = "" if len(off) == 1 else " (%d clips in all)" % len(off)
+        return ["“%s” and the sound split off it no longer line up: the picture runs %s from %s, the "
+                "sound %s from %s.%s" % (c["name"], model.fmt_time(c["duration"]),
+                                         model.fmt_time(c["start"]), model.fmt_time(snd["duration"]),
+                                         model.fmt_time(snd["start"]), more)]
+
     def confirm_picture(self):
-        """Ask before rendering a film that would be black. True to carry on (R5-02)."""
-        said = self.picture_warnings()
+        """Ask before rendering a film whose picture or sound is not what it should be (R5-02)."""
+        said = self.picture_warnings() + self.sound_warnings()
         if not said:
             return True
         d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
@@ -1686,6 +1729,17 @@ class ReelWindow(Gtk.ApplicationWindow):
     def cmd_snapping(self, on=None):
         self.project.snapping = self.snap_check.get_active() if on is None else on == "on"
         self.notice("Snapping %s." % ("on" if self.project.snapping else "off"))
+
+    def cmd_split_sound(self, on=None):
+        """Whether a clip added to the Video track leaves its sound on the Audio track (R5-05)."""
+        want = (self.split_check.get_active() if on is None else on == "on") if hasattr(self, "split_check") \
+            else (on == "on")
+        self.app.settings["split_sound"] = bool(want)
+        if hasattr(self, "split_check"):
+            self.split_check.set_checked(want)
+        self.notice("A clip's own sound %s." % ("goes on the Audio track" if want
+                                                else "stays with the picture"))
+        return want
 
     def cmd_aspect(self, a):
         w, h = ASPECTS.get(a, (1920, 1080))

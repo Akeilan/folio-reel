@@ -161,7 +161,7 @@ class Backstage(Gtk.Box):
         note.set_margin_top(8)
         self.body.pack_start(note, False, False, 0)
         # what the film's picture is missing, before a single frame is rendered (R5-02)
-        said = self.win.picture_warnings()
+        said = self.win.picture_warnings() + self.win.sound_warnings()
         self.picture_note = None
         if said:
             warn = Gtk.Label(label=" ".join(said), xalign=0)
