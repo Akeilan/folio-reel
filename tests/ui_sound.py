@@ -147,6 +147,7 @@ try:
     tl = w1c.timeline
     yy, hh = tl.track_rect("audio")
     st = Gdk.ModifierType(Gdk.ModifierType.MOD1_MASK)
+    was_pic, was_snd = pv["start"], sv["start"]
     x0 = tl.x_of(sv["start"] + sv["duration"] / 2)
     tl._press(tl.area, Ev(type=Gdk.EventType.BUTTON_PRESS, button=1, x=float(x0),
                           y=float(yy + hh / 2), state=st))
@@ -158,8 +159,9 @@ try:
                             y=float(yy + hh / 2), state=st))
     settle()
     pv2, sv2 = w1c.project.track("video")[0], w1c.project.track("audio")[0]
-    check(sv2["start"] > sv["start"] + 0.2 and abs(pv2["start"] - pv["start"]) < 1e-6,
-          "Alt+dragging the sound moves it and leaves the picture", (pv2["start"], sv2["start"]))
+    check(sv2["start"] > was_snd + 0.2 and abs(pv2["start"] - was_pic) < 1e-6,
+          "Alt+dragging the sound moves it and leaves the picture",
+          (was_pic, was_snd, pv2["start"], sv2["start"]))
     check(len(w1c.project.out_of_step()) == 1, "which the check reports",
           w1c.project.out_of_step())
 
@@ -177,11 +179,12 @@ try:
           "and says so when there is nothing to line up", w1c.notice_label.get_text())
 
     # trimming and speed, one half at a time
+    pic_dur = pv3["duration"]
     w1c.edit(lambda pr: pr.trim(sv3["id"], "end", sv3["start"] + 1.5, solo=True))
     settle()
     pv4, sv4 = w1c.project.track("video")[0], w1c.project.track("audio")[0]
-    check(abs(sv4["duration"] - 1.5) < 1e-6 and abs(pv4["duration"] - pv3["duration"]) < 1e-6,
-          "trimming the sound alone leaves the picture", (pv4["duration"], sv4["duration"]))
+    check(abs(sv4["duration"] - 1.5) < 1e-6 and abs(pv4["duration"] - pic_dur) < 1e-6,
+          "trimming the sound alone leaves the picture", (pic_dur, pv4["duration"], sv4["duration"]))
     w1c.run("undo")
     settle()
     w1c.edit(lambda pr: pr.set_speed(w1c.project.track("audio")[0]["id"], 2.0, solo=True))

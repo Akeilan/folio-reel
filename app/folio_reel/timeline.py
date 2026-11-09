@@ -534,7 +534,10 @@ class Timeline(Gtk.Box):
                 ids.append(c["id"])
             self.select(ids)
             return True
-        if solo or c["id"] not in self.selected:
+        # already selected on its own, with linking on: the press should still bring its group in
+        want = self.project.expand_groups([c["id"]]) if not (solo or not self.win.linked_selection()) \
+            else [c["id"]]
+        if solo or any(i not in self.selected for i in want):
             self.select([c["id"]], solo=solo)
         x0, x1 = self.x_of(c["start"]), self.x_of(end_of(c))
         gid = None if (solo or not self.win.linked_selection()) else self.project.group_of(c["id"])
