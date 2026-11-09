@@ -16,6 +16,7 @@ try:
     FOOT = mkshaky.make(os.path.join(os.environ.get("REEL_MEDIA_DIR", "/tmp"), "reel_steady_media"))
     FURI = {k: _model.path_to_uri(v) for k, v in FOOT.items()}
     pump(0.4)
+    win.run("split-sound:off")      # not what this test is about (R5-05)
 
     # the footage is what it says on the tin: one clip shakes, one is bowed by its lens
     shake0 = mkshaky.shake(FOOT["shaky"])

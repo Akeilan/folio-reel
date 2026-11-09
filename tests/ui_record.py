@@ -23,6 +23,7 @@ def record(cmd, secs=1.5, pick=False):
 
 try:
     pump(0.5)
+    win.run("split-sound:off")      # not what this test is about (R5-05)
     win.import_uris([URI["red"]])
     win.add_media_to_timeline([URI["red"]])
     win.seek(1.0)

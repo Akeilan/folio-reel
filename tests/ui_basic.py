@@ -23,6 +23,11 @@ try:
     tips = [c for c in win.ribbon.controls if (c.get_tooltip_markup() or "").count("<b>")]
     check(len(tips) > 20, "ScreenTips: the ribbon's buttons have a title and a description", len(tips))
 
+    # These checks are about one clip at a time: trimming, transitions, selection, the lot. A
+    # clip's own sound going on the Audio track as a second clip (R5-05) is on by default and has
+    # its own test, ui_sound.py, so it is off here.
+    check(win.run("split-sound:off") is False, "a clip's sound stays with it for these checks")
+
     # ---------------------------------------------------------------- media bin (R3-01)
     ms = win.import_uris([URI[k] for k in ("red", "blue", "photo", "music", "speech", "silent")])
     pump(0.5)

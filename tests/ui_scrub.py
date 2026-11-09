@@ -15,6 +15,7 @@ REAL = os.environ.get("REEL_REAL_MEDIA")      # the Product Owner's own clips, w
 
 try:
     pump(0.5)
+    win.run("split-sound:off")      # not what this test is about (R5-05)
     t = win.timeline
     HEAD, RULER = tlmod.HEAD, tlmod.RULER
 

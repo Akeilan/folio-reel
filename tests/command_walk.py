@@ -51,6 +51,7 @@ def commands():
 
 try:
     pump(0.5)
+    win.run("split-sound:off")      # not what this test is about (R5-05)
     win.import_uris([URI[k] for k in ("red", "blue", "photo", "music", "speech")])
     win.add_media_to_timeline([URI["red"]])
     win.add_media_to_timeline([URI["blue"]])
