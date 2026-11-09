@@ -53,8 +53,7 @@ def clip_defaults():
             "chroma": False, "chroma_color": "green", "chroma_tolerance": 20.0,
             "chroma_softness": 2.0, "chroma_edges": 100,
             "steady": False, "steady_amount": 5, "lens": 0.0,
-            "sound_elsewhere": False,       # its own sound is a clip on a sound track (R5-05)
-            "keep_pitch": False}            # a speed change keeps the pitch, at the cost of exact timing
+            "sound_elsewhere": False}       # its own sound is a clip on a sound track (R5-05)
 
 
 def end_of(c):
