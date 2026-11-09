@@ -495,9 +495,29 @@ class Project:
                 continue
             if c["start"] < at - EPS < end_of(c) - 2 * EPS and at - c["start"] > EPS:
                 self._split(track, c, at)
-        for c in lst:
+        self._shift(track, length, at, exclude=exclude)
+
+    def _shift(self, track, delta, at, exclude=None, mirror=True):
+        """Move everything on `track` starting at or after `at` along by `delta`, and bring each
+        one's grouped partners on other tracks with it. Every ripple on a track goes through here,
+        so a picture and the sound split off it cannot be parted by one (R5-05)."""
+        if abs(delta) <= 1e-12:
+            return
+        moved = []
+        for c in self.data["tracks"][track]:
             if c is not exclude and c["start"] >= at - EPS:
-                c["start"] += length
+                c["start"] = max(0.0, c["start"] + delta)
+                moved.append(c)
+        seen = {c["id"] for c in moved}
+        for c in (moved if mirror else []):
+            for other in self.group_members(c.get("group")):
+                if other["id"] in seen:
+                    continue
+                t, _o = self.find(other["id"])
+                if t != track:
+                    other["start"] = max(0.0, other["start"] + delta)
+                    seen.add(other["id"])
+                    self._sort(t)
         self._sort(track)
 
     def _first_free(self, track, at, length):
@@ -592,10 +612,10 @@ class Project:
             t, other = self.find(want)
             if other is not None and t in ("audio", "music"):
                 return other
-        for other in self.group_members(c.get("group")):
-            t, _c = self.find(other["id"])
-            if t in ("audio", "music") and other.get("media") == c.get("media"):
-                return other
+        near = [o for o in self.group_members(c.get("group"))
+                if self.find(o["id"])[0] in ("audio", "music") and o.get("media") == c.get("media")]
+        if near:
+            return min(near, key=lambda o: abs(o["start"] - c["start"]))
         return None
 
     def out_of_step(self, tolerance=None):
@@ -643,6 +663,10 @@ class Project:
         b["transition"] = None
         b["fade_in"] = 0.0
         c["fade_out"] = 0.0
+        # the halves cannot both claim the same partner by name: the group finds the right one
+        for half in (b, c):
+            half.pop("sound_clip", None)
+            half.pop("picture_clip", None)
         b["keyframes"] = [[k - off, v] for k, v in c.get("keyframes", []) if k >= off]
         c["keyframes"] = [[k, v] for k, v in c.get("keyframes", []) if k < off]
         self.data["tracks"][track].append(b)
@@ -679,21 +703,21 @@ class Project:
         if not ids:
             return
         self.checkpoint("Ripple Delete" if ripple else "Delete")
+        gone = []
         for cid in ids:
             track, c = self.find(cid)
             if c is None:
                 continue
-            lst = self.data["tracks"][track]
             nxt = self.neighbours(cid)[1]
-            lst.remove(c)
+            self.data["tracks"][track].remove(c)
             if nxt is not None and nxt.get("transition"):
                 nxt["transition"] = None
-            if ripple:
-                gap = c["duration"]
-                for x in lst:
-                    if x["start"] >= c["start"] - EPS:
-                        x["start"] = max(0.0, x["start"] - gap)
-                self._sort(track)
+            gone.append((track, c))
+        if ripple:
+            # each track closes its own gap, and partners are not dragged along as well: a pair
+            # deleted together leaves the same gap on both tracks and stays in step (R5-05)
+            for track, c in sorted(gone, key=lambda tc: -tc[1]["start"]):
+                self._shift(track, -c["duration"], c["start"], mirror=False)
         self._changed()
 
     def move(self, cid, start, track=None, tolerance=0.0, playhead=None, solo=False):
@@ -864,10 +888,7 @@ class Project:
         old_end = end_of(c)
         c["speed"] = speed
         c["duration"] = new
-        for x in self.data["tracks"][track]:
-            if x is not c and x["start"] >= old_end - EPS:
-                x["start"] += delta
-        self._sort(track)
+        self._shift(track, delta, old_end, exclude=c)
         self._changed()
         return c
 
@@ -896,9 +917,7 @@ class Project:
             c["transition"] = {"type": kind, "duration": duration}
         delta = shift - new_shift
         if abs(delta) > EPS:
-            for x in self.data["tracks"][track]:
-                if x["start"] >= c["start"] - EPS:
-                    x["start"] += delta
+            self._shift(track, delta, c["start"])
         self._sort(track)
         self._changed()
         return c

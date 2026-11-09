@@ -29,6 +29,7 @@ def answer(w, attr, response, delay=350, setup=None):
 try:
     T = tempfile.mkdtemp(prefix="reel_pic_")
     pump(0.5)
+    win.run("split-sound:off")      # not what this test is about (R5-05)
     p = win.project
 
     # ------------------------------------------------ what the project says about its own picture

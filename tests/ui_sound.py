@@ -72,6 +72,48 @@ try:
     settle()
     check(p.out_of_step() == [], "undo puts it back in step", p.out_of_step())
 
+    # ---------------------------------------------------------------- ripples carry the pair
+    w1b = win.run("new")
+    pump(0.6)
+    for _ in range(3):
+        w1b.add_uris([URI["red"]], track="video")
+        settle()
+    vids = w1b.project.track("video")
+    snds = w1b.project.track("audio")
+    check(len(vids) == 3 and len(snds) == 3, "three clips, three sounds",
+          (len(vids), len(snds)))
+    check(w1b.project.out_of_step() == [], "all in step")
+    w1b.timeline.select([vids[1]["id"]])
+    w1b.run("transition:crossfade")
+    settle()
+    check(w1b.project.track("video")[1].get("transition"), "a crossfade on the second clip",
+          w1b.project.track("video")[1].get("transition"))
+    check(w1b.project.out_of_step() == [],
+          "a transition pulls the clips after it earlier and takes their sound along",
+          [(c["name"], c["start"], s2["start"]) for c, s2 in w1b.project.out_of_step()])
+    w1b.run("undo")
+    settle()
+    w1b.timeline.select([w1b.project.track("video")[0]["id"]])
+    w1b.run("ripple-delete")
+    settle()
+    check(len(w1b.project.track("video")) == 2 and len(w1b.project.track("audio")) == 2,
+          "a ripple delete takes the sound with the picture",
+          (len(w1b.project.track("video")), len(w1b.project.track("audio"))))
+    check(w1b.project.out_of_step() == [], "and closes the same gap on both tracks",
+          [(c["start"], s2["start"]) for c, s2 in w1b.project.out_of_step()])
+    first = w1b.project.track("video")[0]
+    check(abs(first["start"]) < 1e-6, "the clips after it moved up", first["start"])
+    # splitting a pair leaves each half with the right sound under it
+    w1b.seek(first["start"] + first["duration"] / 2)
+    w1b.timeline.select([first["id"]])
+    w1b.run("split")
+    settle()
+    check(len(w1b.project.track("video")) == 3 and len(w1b.project.track("audio")) == 3,
+          "splitting a pair splits both halves",
+          (len(w1b.project.track("video")), len(w1b.project.track("audio"))))
+    check(w1b.project.out_of_step() == [], "and each half keeps the sound under it",
+          [(c["start"], c["duration"], s2["start"], s2["duration"]) for c, s2 in w1b.project.out_of_step()])
+
     # ---------------------------------------------------------------- what does not get split
     win.add_uris([URI["photo"]], track="video")
     settle()
