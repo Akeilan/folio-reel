@@ -142,9 +142,12 @@ class Timeline(Gtk.Box):
         return SNAP_PX / self.pps
 
     # ------------------------------------------------------------ selection
-    def select(self, ids):
-        # a clip in a group brings the rest of its group with it (R4-06)
-        self.selected = self.project.expand_groups(list(ids))
+    def select(self, ids, solo=False):
+        """Pick clips. A clip in a group brings the rest of its group with it (R4-06) — unless
+        linked selection is off, or this one press asked for the clip on its own, which is how a
+        picture and the sound split off it are worked on separately (R5-08)."""
+        alone = solo or not self.win.linked_selection()
+        self.selected = list(ids) if alone else self.project.expand_groups(list(ids))
         self.area.queue_draw()
         self.win.selection_changed()
 
@@ -508,9 +511,12 @@ class Timeline(Gtk.Box):
             self.drag = {"kind": "scrub"}
             self.win.seek(self.t_of(ev.x))
             return True
+        # Alt held: this one clip, not its group. A one-off, for when a picture and the sound
+        # split off it want working on apart (R5-08); Ctrl+L turns linking off for longer.
+        solo = bool(ev.state & Gdk.ModifierType.MOD1_MASK)
         if ev.button == 3:
             if c is not None and c["id"] not in self.selected:
-                self.select([c["id"]])
+                self.select([c["id"]], solo=solo)
             self.win.context_menu(ev)
             return True
         if c is None:
@@ -528,10 +534,10 @@ class Timeline(Gtk.Box):
                 ids.append(c["id"])
             self.select(ids)
             return True
-        if c["id"] not in self.selected:
-            self.select([c["id"]])
+        if solo or c["id"] not in self.selected:
+            self.select([c["id"]], solo=solo)
         x0, x1 = self.x_of(c["start"]), self.x_of(end_of(c))
-        gid = self.project.group_of(c["id"])
+        gid = None if (solo or not self.win.linked_selection()) else self.project.group_of(c["id"])
         if ev.x - x0 <= EDGE:
             kind = "trim-start"
         elif x1 - ev.x <= EDGE:
@@ -547,7 +553,8 @@ class Timeline(Gtk.Box):
                (kind == "trim-end" and abs(end_of(c) - outer_end) > EPS):
                 kind = "move"
         self.drag = {"kind": kind, "id": c["id"], "track": tr, "x": ev.x, "y": ev.y,
-                     "t0": self.t_of(ev.x), "start": c["start"], "dur": c["duration"], "moved": False}
+                     "t0": self.t_of(ev.x), "start": c["start"], "dur": c["duration"], "moved": False,
+                     "solo": solo or not self.win.linked_selection()}
         return True
 
     def _motion(self, area, ev):
@@ -688,17 +695,18 @@ class Timeline(Gtk.Box):
         self.snap_line = None
         if d and d.get("moved") and "to" in d:
             try:
+                solo = bool(d.get("solo"))
                 if d["kind"] == "move":
                     track, start = d["to"]
-                    gid = self.project.group_of(d["id"])
+                    gid = None if solo else self.project.group_of(d["id"])
                     if gid:
                         self.project.move_group(gid, start - d["start"])
                     else:
-                        self.project.move(d["id"], start, track=track)
+                        self.project.move(d["id"], start, track=track, solo=True)
                 elif d["kind"] == "trim-start":
-                    self.project.trim(d["id"], "start", d["to"])
+                    self.project.trim(d["id"], "start", d["to"], solo=solo)
                 else:
-                    self.project.trim(d["id"], "end", d["to"])
+                    self.project.trim(d["id"], "end", d["to"], solo=solo)
             except model.EditError as e:
                 self.win.notice(str(e))
         self.area.queue_draw()

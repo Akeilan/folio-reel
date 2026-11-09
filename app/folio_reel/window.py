@@ -713,6 +713,11 @@ class ReelWindow(Gtk.ApplicationWindow):
         """Whether a clip's own sound is put on the Audio track as its own clip (R5-05)."""
         return bool(self.app.settings.get("split_sound", True))
 
+    def linked_selection(self):
+        """Whether picking one clip of a group picks the rest of it (R5-08). Off, or with Alt held
+        on the press, a picture and the sound split off it are moved, trimmed and deleted apart."""
+        return bool(self.app.settings.get("linked_selection", True))
+
     def add_media_to_timeline(self, uris, track=None, at=None):
         added, kept = [], []
         for uri in uris:
@@ -1730,6 +1735,37 @@ class ReelWindow(Gtk.ApplicationWindow):
         self.project.snapping = self.snap_check.get_active() if on is None else on == "on"
         self.notice("Snapping %s." % ("on" if self.project.snapping else "off"))
 
+    def cmd_linked_selection(self, on=None):
+        """Whether picking one clip of a group picks the rest of it (Ctrl+L) (R5-08)."""
+        want = (self.link_check.get_active() if on is None else on == "on") \
+            if hasattr(self, "link_check") else (on == "on")
+        self.app.settings["linked_selection"] = bool(want)
+        if hasattr(self, "link_check"):
+            self.link_check.set_checked(want)
+        if not want:
+            self.timeline.select(list(self.timeline.selected))      # drop the clips linking added
+        self.notice("Picking one clip of a group %s." % ("picks the rest of it" if want
+                                                         else "picks that one only"))
+        return want
+
+    def cmd_line_up_sound(self):
+        """Put a slipped sound clip back exactly under its picture (R5-08)."""
+        sel = self.sel_or_say("a clip whose sound has slipped")
+        if not sel:
+            return None
+        done = []
+        for c in sel:
+            try:
+                if self.edit(lambda p, cid=c["id"]: p.line_up_sound(cid)) is not None:
+                    done.append(c["name"])
+            except model.EditError:
+                continue
+        if done:
+            self.notice("Lined the sound back up under %s." % ", ".join("“%s”" % n for n in done[:3]))
+        else:
+            self.notice("Nothing to line up: the sound is already under its picture.")
+        return done
+
     def cmd_split_sound(self, on=None):
         """Whether a clip added to the Video track leaves its sound on the Audio track (R5-05)."""
         want = (self.split_check.get_active() if on is None else on == "on") if hasattr(self, "split_check") \
@@ -1827,7 +1863,8 @@ class ReelWindow(Gtk.ApplicationWindow):
             cmds = {"n": "new", "o": "open", "s": "save", "w": "close", "z": "undo", "y": "redo", "e": "export",
                     "i": "import-media", "x": "cut", "c": "copy", "v": "paste", "a": "select-all", "equal": "zoom-in",
                     "plus": "zoom-in", "kp_add": "zoom-in", "minus": "zoom-out", "kp_subtract": "zoom-out", "0": "zoom-fit",
-                    "t": "insert-title", "b": "split", "g": "group", "j": "go-to-time"}
+                    "t": "insert-title", "b": "split", "g": "group", "j": "go-to-time",
+                    "l": "linked-selection"}
             if shift:
                 cmds = {"s": "save-as", "z": "redo", "g": "ungroup"}
             if low in cmds:

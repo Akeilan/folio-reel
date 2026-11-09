@@ -618,6 +618,47 @@ class Project:
             return min(near, key=lambda o: abs(o["start"] - c["start"]))
         return None
 
+    def line_up_sound(self, cid):
+        """Put the sound back exactly under its picture: same start, same length, same point into
+        the media. The way back after nudging one of them on its own (R5-08)."""
+        track, c = self.find(cid)
+        if c is None:
+            raise EditError("no such clip")
+        if not c.get("sound_elsewhere"):
+            snd = c
+            pic = None
+            for other in self.all_clips():
+                if other.get("sound_elsewhere") and self.sound_partner(other["id"]) is not None \
+                        and self.sound_partner(other["id"])["id"] == cid:
+                    pic = other
+                    break
+            if pic is None:
+                raise EditError("That clip isn't the sound of a picture clip.")
+        else:
+            pic, snd = c, self.sound_partner(cid)
+            if snd is None:
+                raise EditError("“%s” has no sound clip to line up." % c["name"])
+        if abs(snd["start"] - pic["start"]) <= 1e-9 and abs(snd["duration"] - pic["duration"]) <= 1e-9 \
+                and abs(snd["inpoint"] - pic["inpoint"]) <= 1e-9:
+            return None
+        self.checkpoint("Line Up The Sound")
+        snd_track = self.find(snd["id"])[0]
+        snd["start"] = pic["start"]
+        snd["duration"] = pic["duration"]
+        snd["inpoint"] = pic["inpoint"]
+        snd["speed"] = pic.get("speed", 1.0)
+        snd["fade_in"] = min(snd.get("fade_in", 0.0), snd["duration"])
+        snd["fade_out"] = min(snd.get("fade_out", 0.0), snd["duration"])
+        if not snd.get("group") or snd.get("group") != pic.get("group"):
+            gid = pic.get("group") or self._new_id()
+            pic["group"] = gid
+            snd["group"] = gid
+        pic["sound_clip"] = snd["id"]
+        snd["picture_clip"] = pic["id"]
+        self._sort(snd_track)
+        self._changed()
+        return snd
+
     def out_of_step(self, tolerance=None):
         """[(picture, sound)] for every split pair whose two halves no longer line up. The check
         the sound split asks for: nothing here means every picture still has its own sound under
@@ -794,9 +835,10 @@ class Project:
         self._changed("all" if any(it.get("media") for it in items) else "timeline")
         return out
 
-    def trim(self, cid, edge, t, tolerance=0.0, playhead=None):
+    def trim(self, cid, edge, t, tolerance=0.0, playhead=None, solo=False):
         """Drag a clip's start or end edge to time t (R3-01 trim). The media's own length and the
-        neighbouring clips are the limits."""
+        neighbouring clips are the limits. solo=True trims this clip alone, leaving the rest of its
+        group where it is (R5-08)."""
         track, c = self.find(cid)
         if c is None:
             raise EditError("no such clip")
@@ -806,8 +848,9 @@ class Project:
         self.checkpoint("Trim")
         # a picture and the sound split off it share both edges: trimming one trims the other, or
         # the two would drift apart the moment you shortened a clip (R5-05)
-        together = [m for m in self.group_members(c.get("group")) if m["id"] != cid
-                    and abs(m["start"] - c["start"]) <= EPS and abs(m["duration"] - c["duration"]) <= EPS]
+        together = [] if solo else [
+            m for m in self.group_members(c.get("group")) if m["id"] != cid
+            and abs(m["start"] - c["start"]) <= EPS and abs(m["duration"] - c["duration"]) <= EPS]
         got = self._trim_one(cid, c, edge, t, prev, nxt)
         for m in together:
             mp, mn = self.neighbours(m["id"])
@@ -862,16 +905,16 @@ class Project:
         self._changed("props")
         return c
 
-    def set_speed(self, cid, speed):
+    def set_speed(self, cid, speed, solo=False):
         """Speed (R3-03): 0.25× to 4×. The clip gets shorter or longer on the timeline; clips after it
-        on the track move to keep the cut where it was."""
+        on the track move to keep the cut where it was. solo=True changes this clip alone (R5-08)."""
         track, c = self.find(cid)
         if c is None or c["kind"] != "media":
             raise EditError("Speed is for video and sound clips.")
         speed = max(0.25, min(4.0, float(speed)))
         self.checkpoint("Speed")
         # a picture and the sound split off it run at the same speed, or they stop lining up (R5-05)
-        for m2 in self.group_members(c.get("group")):
+        for m2 in ([] if solo else self.group_members(c.get("group"))):
             if m2["id"] != cid and m2["kind"] == "media" and abs(m2["start"] - c["start"]) <= EPS \
                     and abs(m2["duration"] - c["duration"]) <= EPS:
                 self._speed_one(m2["id"], m2, speed)
