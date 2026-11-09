@@ -683,16 +683,20 @@ def chroma_effect(c):
             "black-sensitivity=%d white-sensitivity=%d" % (r, g, b, tol, soft, edge, edge))
 
 
-def speed_filter(sp, keep_pitch=False):
+def speed_filter(sp):
     """How a clip's sound is sped up or slowed down (R5-05).
 
-    `speed` resamples: the time map is exact, so the sound stays under the picture frame for frame,
-    and the pitch goes down with slow motion as tape does. `pitch` holds the pitch by stretching
-    the sound with WSOLA, whose time map is not linear: measured against a clapperboard it wanders
-    by 12 ms at 2x and 30 ms at half speed, which is a picture and a sound that visibly disagree.
-    So exact timing is what a speed change does unless the clip asks to keep its pitch."""
-    if not keep_pitch and Gst.ElementFactory.find("speed") is not None:
-        return "speed speed=%f" % sp
+    `pitch` stretches the sound with WSOLA and holds its pitch. Its time map is not quite linear:
+    measured against a clapperboard it wanders by 12 ms at 2x and 25 ms at half speed, so a
+    speed-changed clip's sound and picture disagree by up to about half a frame, and not always in
+    the same direction.
+
+    Two exact alternatives were measured and neither survives a render. `speed` resamples exactly
+    (spread 4.7 ms at half speed, identical to four decimal places at 2x) but stalls inside GES:
+    an export never reaches the end. Declaring a lower sample rate and resampling back is exact in
+    a plain pipeline too, but GES cuts the clip's sound to the clip's own length, so the sound ends
+    early instead of stretching — a spread of 1.2 s. Doing it exactly means rendering the speed
+    change to a copy first, the way stabilisation does (R4-07); that is R5-07, not this."""
     return "pitch tempo=%f" % sp
 
 
@@ -808,7 +812,7 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
             if media.get("has_video") and track in ("video", "titles"):
                 clip.add(GES.Effect.new("videorate rate=%f" % sp))
             if media.get("has_audio"):
-                clip.add(GES.Effect.new(speed_filter(sp, c.get("keep_pitch"))))
+                clip.add(GES.Effect.new(speed_filter(sp)))
             clip.set_duration(ns(c["duration"]))
         if track in ("video", "titles"):
             _effects(project, c, clip, media)

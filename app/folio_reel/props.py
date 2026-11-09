@@ -192,13 +192,6 @@ class ClipSettings(Gtk.Box):
             self._row(box, "Volume", self._scale("volume", 0, 200, 5, c.get("volume", 1.0) * 100,
                                                  lambda v: "%d%%" % v,
                                                  lambda v: self._set("Volume", volume=round(v) / 100.0)))
-            if abs(c.get("speed", 1.0) - 1.0) > 1e-6:
-                kp = Gtk.CheckButton(label="Keep the pitch (a little less exact in time)")
-                kp.set_active(c.get("keep_pitch", False))
-                kp.connect("toggled", lambda b: self._quiet or self._set("Keep the Pitch",
-                                                                         keep_pitch=b.get_active()))
-                self.controls["keep_pitch"] = kp
-                box.pack_start(kp, False, False, 0)
             mute = Gtk.CheckButton(label="Mute")
             mute.set_active(c.get("muted", False))
             mute.connect("toggled", lambda b: self._quiet or self._set("Mute", muted=b.get_active()))
@@ -335,9 +328,6 @@ class ClipSettings(Gtk.Box):
             w = self.controls.get("volume")
             if w is not None and abs(w.get_value() - c.get("volume", 1.0) * 100) > 0.5:
                 w.set_value(c.get("volume", 1.0) * 100)
-            w = self.controls.get("keep_pitch")
-            if w is not None:
-                w.set_active(c.get("keep_pitch", False))
             w = self.controls.get("muted")
             if w is not None:
                 w.set_active(c.get("muted", False))
