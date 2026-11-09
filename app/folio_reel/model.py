@@ -52,7 +52,9 @@ def clip_defaults():
             "transition": None, "music_bed": False, "keyframes": [], "muted": False,
             "chroma": False, "chroma_color": "green", "chroma_tolerance": 20.0,
             "chroma_softness": 2.0, "chroma_edges": 100,
-            "steady": False, "steady_amount": 5, "lens": 0.0}
+            "steady": False, "steady_amount": 5, "lens": 0.0,
+            "sound_elsewhere": False,       # its own sound is a clip on a sound track (R5-05)
+            "keep_pitch": False}            # a speed change keeps the pitch, at the cost of exact timing
 
 
 def end_of(c):
@@ -526,6 +528,12 @@ class Project:
         else:
             c = self._text_clip(source, text or {"title": "Title", "lower-third": "Name\nRole",
                                                   "caption": "Caption"}.get(source, ""))
+        self._place_clip(track, c, at, insert)
+        self._changed()
+        return c
+
+    def _place_clip(self, track, c, at, insert=False):
+        """Put a made clip on a track at `at` (None: after the last one there)."""
         lst = self.data["tracks"][track]
         if at is None:
             at = max([end_of(x) for x in lst] + [0.0])
@@ -537,8 +545,74 @@ class Project:
         c["start"] = at
         lst.append(c)
         self._sort(track)
-        self._changed()
         return c
+
+    def room_on(self, track, at, length):
+        """True if `length` seconds from `at` are free on this track."""
+        return abs(self._first_free(track, at, length) - at) < EPS
+
+    def add_media_split(self, track, m, at=None, insert=False, sound_track="audio"):
+        """Add media as two clips kept together: the picture on `track` and its own sound on a
+        sound track at the very same time, grouped so they move and trim as one (R5-05).
+
+        The pair is only made when the sound can go at exactly the picture's time — sound that
+        landed anywhere else would be out of step, which is the whole thing this avoids. Returns
+        (picture, sound), with sound None when it stayed with the picture."""
+        if track not in ("video", "titles"):
+            raise EditError("there's no %s track for pictures" % track)
+        if not (m.get("has_video") and m.get("has_audio")) or m.get("is_image"):
+            return (self.add_clip(track, m, at=at, insert=insert), None)
+        self.checkpoint("Add Clip")
+        pic = self._media_clip(m)
+        self._place_clip(track, pic, at, insert)
+        wanted = [sound_track] + [t for t in ("audio", "music") if t != sound_track]
+        where = next((t for t in wanted if self.room_on(t, pic["start"], pic["duration"])), None)
+        if where is None:
+            self._changed()
+            return (pic, None)
+        snd = self._media_clip(m)
+        snd["name"] = m["name"]
+        self._place_clip(where, snd, pic["start"], insert=False)
+        gid = self._new_id()
+        pic["sound_elsewhere"] = True
+        pic["sound_clip"] = snd["id"]
+        snd["picture_clip"] = pic["id"]
+        pic["group"] = gid
+        snd["group"] = gid
+        self._changed()
+        return (pic, snd)
+
+    def sound_partner(self, cid):
+        """The sound clip that carries this picture clip's own sound, or None. The two know each
+        other by name, so ungrouping them to nudge one does not lose the pairing (R5-05)."""
+        track, c = self.find(cid)
+        if c is None or not c.get("sound_elsewhere"):
+            return None
+        want = c.get("sound_clip")
+        if want:
+            t, other = self.find(want)
+            if other is not None and t in ("audio", "music"):
+                return other
+        for other in self.group_members(c.get("group")):
+            t, _c = self.find(other["id"])
+            if t in ("audio", "music") and other.get("media") == c.get("media"):
+                return other
+        return None
+
+    def out_of_step(self, tolerance=None):
+        """[(picture, sound)] for every split pair whose two halves no longer line up. The check
+        the sound split asks for: nothing here means every picture still has its own sound under
+        it, at the same time and for the same length (R5-05)."""
+        tol = (1.0 / max(1, self.fps)) if tolerance is None else tolerance
+        out = []
+        for name in ("video", "titles"):
+            for c in self.track(name):
+                snd = self.sound_partner(c["id"])
+                if snd is None:
+                    continue
+                if abs(snd["start"] - c["start"]) > tol or abs(snd["duration"] - c["duration"]) > tol:
+                    out.append((c, snd))
+        return out
 
     def add_subtitles(self, entries):
         """Subtitles (R4-03) as caption clips on the Titles track, each at its own time. Captions
@@ -623,12 +697,17 @@ class Project:
                 self._sort(track)
         self._changed()
 
-    def move(self, cid, start, track=None, tolerance=0.0, playhead=None):
+    def move(self, cid, start, track=None, tolerance=0.0, playhead=None, solo=False):
         """Move a clip (optionally to another track). It snaps to clip edges and the playhead, and
-        never lands on top of another clip: it goes to the nearest free place instead."""
+        never lands on top of another clip: it goes to the nearest free place instead. A clip in a
+        group takes its group with it and stays on its own track, so a picture and the sound split
+        off it cannot be parted by any route (R5-05); solo=True moves just this one."""
         old_track, c = self.find(cid)
         if c is None:
             raise EditError("no such clip")
+        gid = None if solo else self.group_of(cid)
+        if gid:
+            return self.move_group(gid, start - c["start"], tolerance=tolerance, playhead=playhead)
         track = track or old_track
         if track != old_track:
             if c["kind"] != "media" and track != "titles":
@@ -702,6 +781,19 @@ class Project:
             t = self.snap(t, tolerance, exclude=(cid,), extra=[playhead] if playhead is not None else [])
         prev, nxt = self.neighbours(cid)
         self.checkpoint("Trim")
+        # a picture and the sound split off it share both edges: trimming one trims the other, or
+        # the two would drift apart the moment you shortened a clip (R5-05)
+        together = [m for m in self.group_members(c.get("group")) if m["id"] != cid
+                    and abs(m["start"] - c["start"]) <= EPS and abs(m["duration"] - c["duration"]) <= EPS]
+        got = self._trim_one(cid, c, edge, t, prev, nxt)
+        for m in together:
+            mp, mn = self.neighbours(m["id"])
+            self._trim_one(m["id"], m, edge, got["start"] if edge == "start" else end_of(got), mp, mn)
+        self._changed()
+        return got
+
+    def _trim_one(self, cid, c, edge, t, prev, nxt):
+        track, _c = self.find(cid)
         sp = c.get("speed", 1.0)
         if edge == "start":
             lo = end_of(prev) - (c["transition"]["duration"] if c.get("transition") else 0) if prev else 0.0
@@ -721,7 +813,6 @@ class Project:
         c["fade_in"] = min(c["fade_in"], c["duration"])
         c["fade_out"] = min(c["fade_out"], c["duration"])
         self._sort(track)
-        self._changed()
         return c
 
     def trim_to_playhead(self, cid, t, edge):
@@ -756,6 +847,15 @@ class Project:
             raise EditError("Speed is for video and sound clips.")
         speed = max(0.25, min(4.0, float(speed)))
         self.checkpoint("Speed")
+        # a picture and the sound split off it run at the same speed, or they stop lining up (R5-05)
+        for m2 in self.group_members(c.get("group")):
+            if m2["id"] != cid and m2["kind"] == "media" and abs(m2["start"] - c["start"]) <= EPS \
+                    and abs(m2["duration"] - c["duration"]) <= EPS:
+                self._speed_one(m2["id"], m2, speed)
+        return self._speed_one(cid, c, speed)
+
+    def _speed_one(self, cid, c, speed):
+        track, _c = self.find(cid)
         m = self.media_by_uri(c["media"])
         span = c["duration"] * c["speed"]                # how much of the media the clip shows
         if not m.get("is_image"):

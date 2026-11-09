@@ -67,8 +67,14 @@ def probe(path):
     w = vids[0].get_width() if vids else 0
     h = vids[0].get_height() if vids else 0
     dur = info.get_duration() / SECOND if info.get_duration() and not is_image else model.IMAGE_SECONDS
+    fps = 0.0
+    if vids:
+        num, den = vids[0].get_framerate_num(), vids[0].get_framerate_denom()
+        if num and den:
+            fps = float(num) / float(den)
     return {"uri": uri, "name": name, "duration": dur, "has_video": bool(vids) and not is_image,
-            "has_audio": bool(auds), "is_image": is_image, "width": w, "height": h}
+            "has_audio": bool(auds), "is_image": is_image, "width": w, "height": h,
+            "fps": round(fps, 3) or None}
 
 
 def thumbnail(info, t=None, width=160):
@@ -207,7 +213,9 @@ def make_proxy(info, width=PROXY_WIDTH, on_progress=None, stop=None, timeout=180
         return out
     w, h = proxy_size(info, width)
     part = out + ".part"
-    prof = encoding_profile("mp4", w, h, 25)
+    # the film's own frame rate, not a fixed 25: a small copy at another rate puts every frame of
+    # the preview on a different grid from the export (R5-05)
+    prof = encoding_profile("mp4", w, h, int(round(info.get("fps") or 25)) or 25)
     pipe = Gst.ElementFactory.make("uritranscodebin")
     if pipe is None:
         return None
@@ -675,6 +683,19 @@ def chroma_effect(c):
             "black-sensitivity=%d white-sensitivity=%d" % (r, g, b, tol, soft, edge, edge))
 
 
+def speed_filter(sp, keep_pitch=False):
+    """How a clip's sound is sped up or slowed down (R5-05).
+
+    `speed` resamples: the time map is exact, so the sound stays under the picture frame for frame,
+    and the pitch goes down with slow motion as tape does. `pitch` holds the pitch by stretching
+    the sound with WSOLA, whose time map is not linear: measured against a clapperboard it wanders
+    by 12 ms at 2x and 30 ms at half speed, which is a picture and a sound that visibly disagree.
+    So exact timing is what a speed change does unless the clip asks to keep its pitch."""
+    if not keep_pitch and Gst.ElementFactory.find("speed") is not None:
+        return "speed speed=%f" % sp
+    return "pitch tempo=%f" % sp
+
+
 def _effects(project, c, clip, media):
     key = chroma_effect(c)
     if key:
@@ -770,7 +791,12 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
                 pw, ph = proxy_size(media)
                 media = dict(media, width=pw, height=ph)
         a = asset(uri)
-        types = GES.TrackType.AUDIO if track in ("audio", "music") else GES.TrackType.UNKNOWN
+        if track in ("audio", "music"):
+            types = GES.TrackType.AUDIO
+        elif c.get("sound_elsewhere"):
+            types = GES.TrackType.VIDEO       # its sound is its own clip on a sound track (R5-05)
+        else:
+            types = GES.TrackType.UNKNOWN
         sp = float(c.get("speed", 1.0))
         span = c["duration"] * sp
         if not media.get("is_image"):
@@ -782,7 +808,7 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
             if media.get("has_video") and track in ("video", "titles"):
                 clip.add(GES.Effect.new("videorate rate=%f" % sp))
             if media.get("has_audio"):
-                clip.add(GES.Effect.new("pitch tempo=%f" % sp))
+                clip.add(GES.Effect.new(speed_filter(sp, c.get("keep_pitch"))))
             clip.set_duration(ns(c["duration"]))
         if track in ("video", "titles"):
             _effects(project, c, clip, media)
