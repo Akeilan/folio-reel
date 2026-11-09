@@ -179,13 +179,29 @@ class ClipSettings(Gtk.Box):
             # its sound is a clip of its own on a sound track (R5-05): the controls are over there
             self._section(box, "Sound")
             snd = p.sound_partner(self.cid)
-            lab = Gtk.Label(xalign=0, label="This clip's sound is its own clip on the %s track, at the "
-                            "same time and grouped with the picture.%s" % (
-                                model.TRACK_NAMES[p.find(snd["id"])[0]] if snd else "Audio",
-                                "" if snd else " It isn't there any more."))
+            off = None
+            if snd is not None:
+                ds, dd = snd["start"] - c["start"], snd["duration"] - c["duration"]
+                if abs(ds) > 1.0 / max(1, p.fps) or abs(dd) > 1.0 / max(1, p.fps):
+                    off = (ds, dd)
+            if snd is None:
+                words = "This clip's sound clip isn't on the timeline any more."
+            elif off:
+                words = ("Its sound is on the %s track but has slipped: %s%s from the picture%s. "
+                         "Line Up The Sound, on the View tab, puts it back." % (
+                             model.TRACK_NAMES[p.find(snd["id"])[0]],
+                             "+" if off[0] >= 0 else "−", model.fmt_time(abs(off[0]), p.fps),
+                             "" if abs(off[1]) <= 1.0 / max(1, p.fps)
+                             else ", and %s longer" % model.fmt_time(abs(off[1]), p.fps) if off[1] > 0
+                             else ", and %s shorter" % model.fmt_time(abs(off[1]), p.fps)))
+            else:
+                words = ("This clip's sound is its own clip on the %s track, at the same time and "
+                         "grouped with the picture. Alt+click, or Ctrl+L, works on one of them alone."
+                         % model.TRACK_NAMES[p.find(snd["id"])[0]])
+            lab = Gtk.Label(xalign=0, label=words)
             lab.set_line_wrap(True)
             lab.set_max_width_chars(34)
-            lab.get_style_context().add_class("dim-label" if snd else "reel-warning")
+            lab.get_style_context().add_class("dim-label" if (snd and not off) else "reel-warning")
             box.pack_start(lab, False, False, 0)
         if has_sound:
             self._section(box, "Sound")

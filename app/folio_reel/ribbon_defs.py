@@ -281,10 +281,19 @@ def build_ribbon(win):
                                       "A clip added to the Video track puts its own sound on the Audio "
                                       "track, at the same time and grouped with the picture"))
     win.split_check = split
+    link = CheckControl(r, "Linked selection", "linked-selection", active=win.linked_selection(),
+                        state="linked-selection", keytip="LS",
+                        tooltip=_tip("Linked selection",
+                                     "Picking one clip of a group picks the rest of it (Ctrl+L). Off, "
+                                     "or with Alt held, a picture and its sound are worked on apart"))
+    win.link_check = link
     B.group(t, "Timeline", [
         [snap],
         [split],
-        [B.small("Go to Time", "reel-goto", "go-to-time", "GT", tip="Go to Time: type where in the film to go (Ctrl+J)")],
+        [link],
+        [B.small("Go to Time", "reel-goto", "go-to-time", "GT", tip="Go to Time: type where in the film to go (Ctrl+J)"),
+         B.small("Line Up The Sound", "reel-snap", "line-up-sound", "LU",
+                 tip="Line Up The Sound: put a slipped sound clip back under its picture")],
     ])
     B.group(t, "Project", [
         B.big("Shape", "reel-aspect", None, "SH",

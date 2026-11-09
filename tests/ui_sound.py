@@ -114,6 +114,104 @@ try:
     check(w1b.project.out_of_step() == [], "and each half keeps the sound under it",
           [(c["start"], c["duration"], s2["start"], s2["duration"]) for c, s2 in w1b.project.out_of_step()])
 
+    # ---------------------------------------------------------------- one half at a time (R5-08)
+    w1c = win.run("new")
+    pump(0.6)
+    check(w1c.linked_selection(), "picking one clip of a group picks the rest, to begin with")
+    w1c.add_uris([URI["red"]], track="video", at=1.0)
+    settle()
+    t2 = w1c.timeline
+    pv, sv = w1c.project.track("video")[0], w1c.project.track("audio")[0]
+    y2, h2 = t2.track_rect("video")
+
+    def press_on(w, clip, track, alt=False):
+        tl = w.timeline
+        yy, hh = tl.track_rect(track)
+        st = Gdk.ModifierType(Gdk.ModifierType.MOD1_MASK if alt else 0)
+        tl._press(tl.area, Ev(type=Gdk.EventType.BUTTON_PRESS, button=1,
+                              x=float(tl.x_of(clip["start"] + clip["duration"] / 2)),
+                              y=float(yy + hh / 2), state=st))
+        tl._release(tl.area, Ev(type=Gdk.EventType.BUTTON_RELEASE, button=1,
+                                x=float(tl.x_of(clip["start"] + clip["duration"] / 2)),
+                                y=float(yy + hh / 2), state=st))
+        pump(0.05)
+
+    press_on(w1c, pv, "video")
+    check(len(t2.selected) == 2, "clicking the picture picks its sound as well", len(t2.selected))
+    press_on(w1c, pv, "video", alt=True)
+    check(t2.selected == [pv["id"]], "Alt+click picks the picture on its own", t2.selected)
+    press_on(w1c, sv, "audio", alt=True)
+    check(t2.selected == [sv["id"]], "and the sound on its own", t2.selected)
+
+    # Alt+drag moves one of them and leaves the other
+    tl = w1c.timeline
+    yy, hh = tl.track_rect("audio")
+    st = Gdk.ModifierType(Gdk.ModifierType.MOD1_MASK)
+    x0 = tl.x_of(sv["start"] + sv["duration"] / 2)
+    tl._press(tl.area, Ev(type=Gdk.EventType.BUTTON_PRESS, button=1, x=float(x0),
+                          y=float(yy + hh / 2), state=st))
+    for k in range(1, 7):
+        tl._motion(tl.area, Ev(type=Gdk.EventType.MOTION_NOTIFY, x=float(x0 + 40 * k / 6),
+                               y=float(yy + hh / 2),
+                               state=Gdk.ModifierType(st | Gdk.ModifierType.BUTTON1_MASK)))
+    tl._release(tl.area, Ev(type=Gdk.EventType.BUTTON_RELEASE, button=1, x=float(x0 + 40),
+                            y=float(yy + hh / 2), state=st))
+    settle()
+    pv2, sv2 = w1c.project.track("video")[0], w1c.project.track("audio")[0]
+    check(sv2["start"] > sv["start"] + 0.2 and abs(pv2["start"] - pv["start"]) < 1e-6,
+          "Alt+dragging the sound moves it and leaves the picture", (pv2["start"], sv2["start"]))
+    check(len(w1c.project.out_of_step()) == 1, "which the check reports",
+          w1c.project.out_of_step())
+
+    # and there is a way back
+    w1c.timeline.select([pv2["id"]], solo=True)
+    w1c.run("line-up-sound")
+    settle()
+    pv3, sv3 = w1c.project.track("video")[0], w1c.project.track("audio")[0]
+    check(abs(sv3["start"] - pv3["start"]) < 1e-9 and abs(sv3["duration"] - pv3["duration"]) < 1e-9,
+          "Line Up The Sound puts it back under the picture", (pv3["start"], sv3["start"]))
+    check(w1c.project.out_of_step() == [], "in step again")
+    w1c.run("line-up-sound")
+    pump(0.1)
+    check("already under its picture" in w1c.notice_label.get_text(),
+          "and says so when there is nothing to line up", w1c.notice_label.get_text())
+
+    # trimming and speed, one half at a time
+    w1c.edit(lambda pr: pr.trim(sv3["id"], "end", sv3["start"] + 1.5, solo=True))
+    settle()
+    pv4, sv4 = w1c.project.track("video")[0], w1c.project.track("audio")[0]
+    check(abs(sv4["duration"] - 1.5) < 1e-6 and abs(pv4["duration"] - pv3["duration"]) < 1e-6,
+          "trimming the sound alone leaves the picture", (pv4["duration"], sv4["duration"]))
+    w1c.run("undo")
+    settle()
+    w1c.edit(lambda pr: pr.set_speed(w1c.project.track("audio")[0]["id"], 2.0, solo=True))
+    settle()
+    pv5, sv5 = w1c.project.track("video")[0], w1c.project.track("audio")[0]
+    check(abs(sv5["speed"] - 2.0) < 1e-9 and abs(pv5["speed"] - 1.0) < 1e-9,
+          "and so does a speed change", (pv5["speed"], sv5["speed"]))
+    w1c.run("undo")
+    settle()
+
+    # deleting one half
+    w1c.timeline.select([w1c.project.track("audio")[0]["id"]], solo=True)
+    w1c.run("delete")
+    settle()
+    check(len(w1c.project.track("video")) == 1 and not w1c.project.track("audio"),
+          "the sound can be deleted on its own",
+          (len(w1c.project.track("video")), len(w1c.project.track("audio"))))
+    w1c.run("undo")
+    settle()
+
+    # the toggle does the same for longer
+    check(w1c.run("linked-selection:off") is False and not w1c.linked_selection(),
+          "linked selection can be turned off")
+    press_on(w1c, w1c.project.track("video")[0], "video")
+    check(len(w1c.timeline.selected) == 1, "then a plain click picks one clip",
+          len(w1c.timeline.selected))
+    check(w1c.run("linked-selection:on") is True, "and turned back on")
+    press_on(w1c, w1c.project.track("video")[0], "video")
+    check(len(w1c.timeline.selected) == 2, "linked again", len(w1c.timeline.selected))
+
     # ---------------------------------------------------------------- what does not get split
     win.add_uris([URI["photo"]], track="video")
     settle()
