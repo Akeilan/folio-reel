@@ -54,14 +54,14 @@ try:
     check(c["steady"] is True, "ticking the box turns steadying on")
     check(engine.fix_settings(c) == (True, 5, 0.0, 1.0, "av"), "which is what the clip now asks for", engine.fix_settings(c))
     check(engine.fixed_copy(c["media"], c) is None, "but nothing is corrected until it is rendered")
-    check("still plays as it was filmed" in panel.controls["steady_ready"].get_text(),
+    check("Not rendered yet" in panel.controls["steady_ready"].get_text(),
           "and the panel says so", panel.controls["steady_ready"].get_text())
     check(engine.have_ffmpeg(), "ffmpeg is installed, so this can be rendered")
     panel.controls["steady_apply"].clicked()
     pump(0.3)
     fixed = engine.fixed_copy(c["media"], win.project.clip(c["id"]))
     check(fixed is not None, "Render the corrected copy makes one", win.notice_label.get_text())
-    check("corrected" in win.notice_label.get_text(), "and says it is ready", win.notice_label.get_text())
+    check("rendered" in win.notice_label.get_text(), "and says it is ready", win.notice_label.get_text())
     panel.refresh()
     pump(0.2)
     check("ready" in panel.controls["steady_ready"].get_text(), "the panel agrees",
