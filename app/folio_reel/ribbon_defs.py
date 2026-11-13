@@ -236,9 +236,9 @@ def build_ribbon(win):
         [B.small("Straighten", "reel-panzoom", None, "SR", menu=STRAIGHTEN,
                  tip="Straighten: take the bulge or the pinch out of the lens"),
          B.small("Render Correction", "reel-export", "steady-apply", "SA",
-                 tip="Render Correction: make the corrected copy the selected clip asks for"),
+                 tip="Render Correction: render the steadied, straightened or speed-changed copy the selected clips ask for"),
          B.small("Remove Corrections", "reel-reset", "remove-fixes", "SX",
-                 tip="Remove Corrections: throw the corrected copies away")],
+                 tip="Remove Corrections: throw the rendered copies away")],
     ])
     r.add_tab(t)
 

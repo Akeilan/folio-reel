@@ -8,7 +8,7 @@ XD=${XD:-95}
 V=$(sed -n 's/^Version: //p' $R/packaging/DEBIAN/control)
 /home/claude/mounts.sh >/dev/null 2>&1
 pgrep -x Xvfb -a | grep -q ":$XD " || { rm -f /tmp/.X$XD-lock /tmp/.X11-unix/X$XD; setsid -f Xvfb :$XD -screen 0 1600x1000x24 -nolisten tcp </dev/null >/dev/null 2>&1; sleep 1; }
-UI=${UI_TESTS:-ui_basic.py ui_record.py ui_steady.py ui_scrub.py ui_picture.py ui_sound.py}
+UI=${UI_TESTS:-ui_basic.py ui_record.py ui_steady.py ui_scrub.py ui_picture.py ui_sound.py ui_speed.py}
 MIC="FOLIO_REEL_AUDIOSRC='audiotestsrc is-live=true freq=500'"
 mkdir -p /srv/jammy/src/reel && rsync -a --delete --exclude .git $R/ /srv/jammy/src/reel/
 if [ -z "${INSTALLED_ONLY:-}" ]; then

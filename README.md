@@ -18,12 +18,17 @@ what a video editor still needs.
   the comma and full stop keys walk between them. Clips snap to markers, and the flags are saved
   with the project.
 - **Clips**: speed, volume, fade in and out, pan and zoom (Ken Burns), crop, mute, and colour
-  changes — brighter, darker, contrast, black and white — with keyframes.
+  changes — brighter, darker, contrast, black and white — with keyframes. Slow motion and fast
+  forward are rendered into a copy of the footage, so the sound keeps step with the picture to the
+  sample instead of drifting a frame either way; the sound changes pitch with the speed, as tape
+  does. Footage over three minutes waits for Render Correction rather than hold you up.
 - **Chroma key**: key a green or blue background out of a clip, with tolerance, softness and an
   edge setting, so what is under it on the timeline shows through.
 - **Steady and straighten**: take the shake out of a hand-held clip, and take the bulge or the
   pinch out of a wide or a long lens. Both have to look at the whole clip, so Reel renders a
   corrected copy of the file once with ffmpeg and edits that; the preview and every export use it.
+  A speed change is rendered into the same copy, and a clip whose sound sits on its own track
+  renders only the half it shows.
 - **Between clips**: transitions with a duration you choose.
 - **Text**: titles, captions and lower thirds.
 - **Subtitles**: import an .srt and it becomes captions on the Titles track, trimmed and styled
@@ -52,10 +57,12 @@ cd app && python3 -m folio_reel         # run it
 python3 tests/test_engine.py            # the engine
 sh tests/run_ui.sh ui_basic.py          # the interface, on an X display
 sh tests/run_ui.sh ui_steady.py         # steadying and straightening (R4-07)
+sh tests/run_ui.sh ui_speed.py          # slow motion that keeps its sound in step (R5-07)
 sh tests/theme_run.sh                   # desktop themes (X2-01)
 sh build-deb.sh out/                    # the package
 XD=95 tools/release.sh                  # everything, on the three test machines
 ```
 
-Needs python3-gi, GTK 3 and GStreamer (base, good, bad, libav). Steadying and straightening
-also need ffmpeg; without it Reel says so and leaves the clip alone.
+Needs python3-gi, GTK 3 and GStreamer (base, good, bad, libav). Steadying, straightening and
+exact speed also need ffmpeg; without it Reel says so, and a speed change falls back to stretching
+the sound to fit.
