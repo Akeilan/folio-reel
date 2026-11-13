@@ -172,7 +172,7 @@ class ClipSettings(Gtk.Box):
             sp = c.get("speed", 1.0)
             idx = min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - sp))
             self._row(box, "Speed", self._combo("speed", ["%g×" % s for s in SPEEDS], idx,
-                                                lambda i: self.win.edit(lambda p: p.set_speed(self.cid, SPEEDS[i]))))
+                                                lambda i: self.win.run("speed:%g" % SPEEDS[i])))
         # ---- sound (R3-05)
         has_sound = m is not None and m.get("has_audio") and not c.get("sound_elsewhere")
         if c.get("sound_elsewhere"):
@@ -381,10 +381,10 @@ class ClipSettings(Gtk.Box):
                 if want is None:
                     w.set_text("")
                 elif engine.fixed_copy(c["media"], c) is not None:
-                    w.set_text("The corrected copy is ready.")
+                    w.set_text("The rendered copy is ready.")
                 elif not engine.have_ffmpeg():
-                    w.set_text("ffmpeg isn\u2019t installed, so this clip can\u2019t be corrected.")
+                    w.set_text("ffmpeg isn\u2019t installed, so this clip can\u2019t be rendered.")
                 else:
-                    w.set_text("Not rendered yet: this clip still plays as it was filmed.")
+                    w.set_text("Not rendered yet: Reel is still working from the footage as it was filmed.")
         finally:
             self._quiet = False

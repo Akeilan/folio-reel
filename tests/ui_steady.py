@@ -52,7 +52,7 @@ try:
     pump(0.3)
     c = win.project.clip(c["id"])
     check(c["steady"] is True, "ticking the box turns steadying on")
-    check(engine.fix_settings(c) == (True, 5, 0.0), "which is what the clip now asks for", engine.fix_settings(c))
+    check(engine.fix_settings(c) == (True, 5, 0.0, 1.0, "av"), "which is what the clip now asks for", engine.fix_settings(c))
     check(engine.fixed_copy(c["media"], c) is None, "but nothing is corrected until it is rendered")
     check("still plays as it was filmed" in panel.controls["steady_ready"].get_text(),
           "and the panel says so", panel.controls["steady_ready"].get_text())
@@ -116,7 +116,7 @@ try:
     pump(0.3)
     b = win.project.clip(b["id"])
     check(abs(b["lens"] - 1.0) < 1e-6, "Straighten to the end of the slider", b["lens"])
-    check(engine.fix_settings(b) == (False, 5, 1.0), "which asks for straightening alone", engine.fix_settings(b))
+    check(engine.fix_settings(b) == (False, 5, 1.0, 1.0, "av"), "which asks for straightening alone", engine.fix_settings(b))
     win.run("steady-apply")
     pump(0.3)
     bfix = engine.fixed_copy(b["media"], win.project.clip(b["id"]))

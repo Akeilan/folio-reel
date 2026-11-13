@@ -1477,49 +1477,54 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.notice("Straightening set. Choose Render Correction to make the corrected copy.")
         return 1
 
-    def cmd_steady_apply(self, arg=None):
-        """Render the corrected copies the selected clips ask for. Reel edits those copies from
-        here on, in the preview and in any export."""
+    def _render_fixes(self, sel, doing="Rendering"):
+        """Render the copies these clips ask for: steadied, straightened, run at their own speed,
+        or any mix. How many were made, or -1 when ffmpeg is missing and the user has been told."""
         from . import engine
-        sel = self.sel_or_say("a video clip", kinds=("media",))
-        if not sel:
-            return 0
         want = []
         for c in sel:
             m = self.project.media_by_uri(c["media"])
             st = engine.fix_settings(c)
-            if st is None or m is None or not m.get("has_video") or m.get("is_image"):
+            if st is None or m is None or m.get("is_image"):
                 continue
             if engine.fixed_copy(c["media"], c) is None:
                 want.append((c, m, st))
         if not want:
-            if any(engine.fix_settings(c) for c in sel):
-                self.notice("Those are ready; the preview plays the corrected copies.")
-                self._reshow()
-            else:
-                self.notice("Turn on Steady or move Straighten first.")
             return 0
         if not engine.have_ffmpeg():
             self.notice(engine.FFMPEG_MISSING, seconds=20)
-            return 0
+            return -1
         done = 0
         for i, (c, m, st) in enumerate(want):
-            self.notice("Correcting %d of %d (%s)\u2026" % (i + 1, len(want), c["name"]))
-            while Gtk.events_pending():
-                Gtk.main_iteration_do(False)
-
             def progress(f, i=i, c=c):
-                self.notice("Correcting %d of %d (%s): %d%%" % (i + 1, len(want), c["name"], int(f * 100)))
+                self.notice("%s %d of %d (%s): %d%%" % (doing, i + 1, len(want), c["name"], int(f * 100)))
                 while Gtk.events_pending():
                     Gtk.main_iteration_do(False)
+            progress(0.0)
             if engine.make_fix(m, st, on_progress=progress):
                 done += 1
         if done:
-            self.notice("%d clip%s corrected; the preview plays the corrected copies."
+            self._reshow()
+        return done
+
+    def cmd_steady_apply(self, arg=None):
+        """Render the copies the selected clips ask for. Reel edits those copies from here on, in
+        the preview and in any export."""
+        from . import engine
+        sel = self.sel_or_say("a video clip", kinds=("media",))
+        if not sel:
+            return 0
+        done = self._render_fixes(sel)
+        if done < 0:
+            return 0
+        if done:
+            self.notice("%d clip%s rendered; the preview plays the rendered copies."
                         % (done, "" if done == 1 else "s"))
+        elif any(engine.fix_settings(c) for c in sel):
+            self.notice("Those are ready; the preview plays the rendered copies.")
             self._reshow()
         else:
-            self.notice("The corrected copies couldn\u2019t be made.")
+            self.notice("Turn on Steady, move Straighten or choose a speed first.")
         return done
 
     def cmd_remove_fixes(self):
@@ -1614,7 +1619,35 @@ class ReelWindow(Gtk.ApplicationWindow):
         self.each("Colour", apply, "a video clip or picture", kinds=("media",))
 
     def cmd_speed(self, x):
-        self.each("Speed", lambda p, c: p.set_speed(c["id"], float(x)), "a video or sound clip", kinds=("media",))
+        """Slow motion or fast forward. Short footage is rendered to a copy that runs at that speed
+        there and then, so its sound keeps step with its picture to the sample (R5-07)."""
+        from . import engine
+        sel = self.sel_or_say("a video or sound clip", kinds=("media",))
+        if not sel:
+            return 0
+        for c in sel:
+            self.edit(lambda p, c=c: p.set_speed(c["id"], float(x)))
+        want, long, seen = [], [], set()
+        for c in sel:
+            now = self.project.clip(c["id"])
+            if now is None:
+                continue
+            # a picture and the sound split off it change speed together (R5-05), so both render
+            for cid in (now["id"], now.get("sound_clip"), now.get("picture_clip")):
+                cur = self.project.clip(cid) if cid else None
+                if cur is None or cur["id"] in seen:
+                    continue
+                seen.add(cur["id"])
+                m = self.project.media_by_uri(cur["media"])
+                if m is None or m.get("is_image") or engine.fix_settings(cur) is None:
+                    continue
+                (long if float(m.get("duration") or 0) > engine.RETIME_AUTO else want).append(cur)
+        if want:
+            self._render_fixes(want, "Changing the speed of")
+        if long:
+            self.notice("“%s” is long, so its sound is stretched to fit for now. Choose Render "
+                        "Correction to make the speed exact." % long[0]["name"], seconds=12)
+        return 1
 
     def cmd_panzoom(self, how):
         self.each("Pan and Zoom", lambda p, c: p.set(c["id"], label="Pan and Zoom", panzoom=None if how == "none" else how),

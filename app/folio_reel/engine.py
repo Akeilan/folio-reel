@@ -367,8 +367,11 @@ def forget_waves():
 # stale copy. Without ffmpeg Reel says so and leaves the clip alone.
 LENS_MAX = 0.9                      # the full slider, as ffmpeg lenscorrection's k1
 STEADY_MIN, STEADY_MAX = 1, 10
-FFMPEG_MISSING = ("Steadying and straightening need ffmpeg, which isn\u2019t installed on this "
-                  "computer. Install the ffmpeg package and try again.")
+RETIME_RATE = 48000                 # the sample rate a speed change is resampled around (R5-07)
+RETIME_MAX_FPS = 120                # the most frames a second a sped-up copy is given
+FFMPEG_MISSING = ("Steadying, straightening and exact speed need ffmpeg, which isn’t "
+                  "installed on this computer. Install the ffmpeg package and try again.")
+RETIME_AUTO = 180.0                 # footage up to this long is rendered as soon as its speed changes
 
 
 def ffmpeg_path():
@@ -384,21 +387,38 @@ def have_ffmpeg():
     return ffmpeg_path() is not None
 
 
+def speed_of(c):
+    """The clip’s speed, rounded so its sound can be resampled by a whole number of samples a
+    second (R5-07). Every speed the ribbon offers already is."""
+    try:
+        sp = float(c.get("speed", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        sp = 1.0
+    sp = max(0.25, min(4.0, sp))
+    return round(int(round(RETIME_RATE * sp)) / RETIME_RATE, 9)
+
+
 def fix_settings(c):
-    """(steady, amount, lens) this clip wants, or None if it wants neither."""
-    steady = bool(c.get("steady"))
+    """(steady, amount, lens, speed, part) this clip wants rendered to a copy, or None if it wants
+    nothing. `part` is the half of the film the clip actually uses — "v" picture, "a" sound, "av"
+    both — so a clip whose sound plays from its own clip on a sound track (R5-05) renders only the
+    half it shows, and the two halves of one piece of footage share one render when they can."""
+    part = "a" if c.get("picture_clip") else ("v" if c.get("sound_elsewhere") else "av")
+    steady = bool(c.get("steady")) and part != "a"
     try:
         lens = float(c.get("lens", 0.0) or 0.0)
     except (TypeError, ValueError):
         lens = 0.0
-    lens = round(max(-1.0, min(1.0, lens)), 3)
-    if not steady and abs(lens) < 1e-6:
+    lens = 0.0 if part == "a" else round(max(-1.0, min(1.0, lens)), 3)
+    speed = speed_of(c)
+    if not steady and abs(lens) < 1e-6 and abs(speed - 1.0) < 1e-9:
         return None
     try:
         amount = int(round(float(c.get("steady_amount", 5))))
     except (TypeError, ValueError):
         amount = 5
-    return (steady, max(STEADY_MIN, min(STEADY_MAX, amount)), lens)
+    amount = max(STEADY_MIN, min(STEADY_MAX, amount)) if steady else 5
+    return (steady, amount, lens, speed, part)
 
 
 def fix_dir():
@@ -410,14 +430,15 @@ def fix_dir():
 def fix_path(uri, settings):
     """Where the corrected copy of this media with these settings lives."""
     import hashlib
-    steady, amount, lens = settings
+    steady, amount, lens, speed, part = settings
     path = model.uri_to_path(uri) or uri
     try:
         st = os.stat(path)
         stamp = "%d-%d" % (st.st_size, int(st.st_mtime))
     except OSError:
         stamp = "0-0"
-    key = hashlib.sha1(("%s|%s|%d|%d|%.3f" % (uri, stamp, 1 if steady else 0, amount, lens)).encode()).hexdigest()[:16]
+    key = hashlib.sha1(("%s|%s|%d|%d|%.3f|%.6f|%s"
+                        % (uri, stamp, 1 if steady else 0, amount, lens, speed, part)).encode()).hexdigest()[:16]
     return os.path.join(fix_dir(), "%s.mp4" % key)
 
 
@@ -425,6 +446,26 @@ def lens_filter(lens):
     """ffmpeg's straightening. Positive takes the bulge out of a wide lens (barrel), negative
     takes the pinch out of a long one (pincushion)."""
     return "lenscorrection=k1=%.4f:k2=0:i=bilinear" % (lens * LENS_MAX)
+
+
+def retime_filters(speed):
+    """(picture, sound) ffmpeg filters that render a speed change into the copy itself (R5-07).
+
+    The picture is restamped and the sound resampled: sound at time t lands at exactly t / speed,
+    with nothing left to stretch at playing time, so picture and sound cannot drift apart. Measured
+    against a clapperboard the sound sits within a sample of where it should, at every speed, and
+    the gap does not wander along the clip the way a time-stretch’s does. The sound changes pitch
+    with the speed, as tape does; that is the price of being exact.
+    """
+    rate = int(round(RETIME_RATE * speed))
+    return ("setpts=PTS/%.9f" % speed,
+            "aresample=%d,asetrate=%d,aresample=%d" % (RETIME_RATE, rate, RETIME_RATE))
+
+
+def retime_fps(speed, fps):
+    """The frames a second a sped-up copy is written at, so a fast-forward keeps its frames."""
+    f = float(fps or 25) or 25.0
+    return min(RETIME_MAX_FPS, round(f * speed, 3)) if speed > 1.0 else None
 
 
 def steady_filters(amount, trf):
@@ -468,12 +509,18 @@ def _ffmpeg_run(args, duration, on_progress, stop, timeout, base=0.0, span=1.0):
 
 
 def make_fix(info, settings, on_progress=None, stop=None, timeout=3600):
-    """The corrected copy of this media. Returns its path, or None if it has no picture, ffmpeg
-    isn\u2019t there or the copy couldn\u2019t be made. An existing copy is used as it is."""
-    if not info.get("has_video") or info.get("is_image") or settings is None:
+    """The corrected copy of this media: steadied, straightened, run at its new speed, or any mix
+    of the three. Returns its path, or None if there is nothing to render, ffmpeg isn’t there or
+    the copy couldn’t be made. An existing copy is used as it is."""
+    if settings is None or info.get("is_image"):
         return None
     exe = ffmpeg_path()
     if exe is None:
+        return None
+    steady, amount, lens, speed, part = settings
+    picture = part != "a" and bool(info.get("has_video"))
+    sound = part != "v" and bool(info.get("has_audio"))
+    if not picture and not sound:
         return None
     out = fix_path(info["uri"], settings)
     if os.path.exists(out) and os.path.getsize(out) > 0:
@@ -483,37 +530,58 @@ def make_fix(info, settings, on_progress=None, stop=None, timeout=3600):
     src = model.uri_to_path(info["uri"])
     if not src or not os.path.exists(src):
         return None
-    steady, amount, lens = settings
-    dur = float(info.get("duration") or 0)
-    part = out + ".part"
+    retimed = abs(speed - 1.0) > 1e-9
+    vmove, amove = retime_filters(speed)
+    dur = float(info.get("duration") or 0) / (speed if retimed else 1.0)
+    part_file = out + ".part"
     trf = out + ".trf"
-    chain = []
+    look_share = 0.5 if (steady and picture) else 0.0
     ok = True
-    if steady:
+    if steady and picture:
         look, move = steady_filters(amount, trf)
         ok = _ffmpeg_run([exe, "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1",
                           "-i", src, "-vf", look, "-an", "-f", "null", "-"],
-                         dur, on_progress, stop, timeout, 0.0, 0.5)
-        chain.append(move)
-    if ok and abs(lens) > 1e-6:
-        chain.append(lens_filter(lens))
-    chain.append("format=yuv420p")
+                         float(info.get("duration") or 0), on_progress, stop, timeout, 0.0, look_share)
+    args = [exe, "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-i", src]
+    chains, maps = [], []
+    if picture:
+        v = []
+        if steady:
+            v.append(steady_filters(amount, trf)[1])
+        if abs(lens) > 1e-6:
+            v.append(lens_filter(lens))
+        if retimed:
+            v.append(vmove)
+        v.append("format=yuv420p")
+        chains.append("[0:v]%s[v]" % ",".join(v))
+        maps += ["-map", "[v]"]
+        rate = retime_fps(speed, info.get("fps")) if retimed else None
+        if rate:
+            maps += ["-r", "%g" % rate]
+    else:
+        maps.append("-vn")
+    if sound:
+        chains.append("[0:a]%s[a]" % (amove if retimed else "anull"))
+        maps += ["-map", "[a]"]
+    else:
+        maps.append("-an")
+    args += ["-filter_complex", ";".join(chains)] + maps
+    if picture:
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+    if sound:
+        args += ["-c:a", "aac", "-b:a", "192k"]
+    args += ["-movflags", "+faststart", "-f", "mp4", part_file]
     if ok:
-        ok = _ffmpeg_run([exe, "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1",
-                          "-i", src, "-vf", ",".join(chain), "-c:v", "libx264", "-preset", "veryfast",
-                          "-crf", "20", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
-                          "-f", "mp4", part],
-                         dur, on_progress, stop, timeout, 0.5 if steady else 0.0, 0.5 if steady else 1.0)
-    for f in (trf,):
-        if os.path.exists(f):
-            os.remove(f)
-    if ok and os.path.exists(part) and os.path.getsize(part) > 0:
-        os.replace(part, out)
+        ok = _ffmpeg_run(args, dur, on_progress, stop, timeout, look_share, 1.0 - look_share)
+    if os.path.exists(trf):
+        os.remove(trf)
+    if ok and os.path.exists(part_file) and os.path.getsize(part_file) > 0:
+        os.replace(part_file, out)
         if on_progress is not None:
             on_progress(1.0)
         return out
-    if os.path.exists(part):
-        os.remove(part)
+    if os.path.exists(part_file):
+        os.remove(part_file)
     return None
 
 
@@ -684,19 +752,20 @@ def chroma_effect(c):
 
 
 def speed_filter(sp):
-    """How a clip's sound is sped up or slowed down (R5-05).
+    """How a clip’s sound is sped up or slowed down while nothing has been rendered (R5-05).
 
     `pitch` stretches the sound with WSOLA and holds its pitch. Its time map is not quite linear:
     measured against a clapperboard it wanders by 12 ms at 2x and 25 ms at half speed, so a
-    speed-changed clip's sound and picture disagree by up to about half a frame, and not always in
-    the same direction.
+    speed-changed clip’s sound and picture disagree by up to about half a frame, and not always in
+    the same direction. Two exact alternatives were measured and neither survives a render. `speed`
+    resamples exactly but stalls inside GES: an export never reaches the end. Declaring a lower
+    sample rate and resampling back is exact in a plain pipeline too, but GES cuts the clip’s sound
+    to the clip’s own length, so the sound ends early instead of stretching — a spread of 1.2 s.
 
-    Two exact alternatives were measured and neither survives a render. `speed` resamples exactly
-    (spread 4.7 ms at half speed, identical to four decimal places at 2x) but stalls inside GES:
-    an export never reaches the end. Declaring a lower sample rate and resampling back is exact in
-    a plain pipeline too, but GES cuts the clip's sound to the clip's own length, so the sound ends
-    early instead of stretching — a spread of 1.2 s. Doing it exactly means rendering the speed
-    change to a copy first, the way stabilisation does (R4-07); that is R5-07, not this."""
+    So the exact answer is not a filter at all: the speed is rendered into a copy of the footage
+    and that copy plays at its own pace, which is R5-07 and what a clip normally gets. This is what
+    the preview falls back on in the moments before that copy exists, and where ffmpeg is missing.
+    """
     return "pitch tempo=%f" % sp
 
 
@@ -783,9 +852,13 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
         if media is None or not os.path.exists(model.uri_to_path(c["media"]) or ""):
             return None
         uri = c["media"]
-        fixed = fixed_copy(uri, c) if track in ("video", "titles") else None
+        want = fix_settings(c)
+        fixed = fixed_copy(uri, c)
+        # a copy that was rendered at the clip’s speed already runs at it, so nothing stretches it
+        # again at playing time (R5-07)
+        retimed = fixed is not None and want is not None and abs(want[3] - 1.0) > 1e-9
         if fixed is not None:
-            # steadied, straightened, or both (R4-07): that copy is the film now, so no small copy
+            # steadied, straightened, retimed (R4-07, R5-07): that copy is the film now, so no small copy
             uri = GLib.filename_to_uri(fixed, None)
         elif proxies and media.get("has_video") and not media.get("is_image"):
             # the small copy, where one has been made: same film, fewer pixels to push (R4-04)
@@ -802,10 +875,14 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
         else:
             types = GES.TrackType.UNKNOWN
         sp = float(c.get("speed", 1.0))
+        inpoint, mdur = c["inpoint"], float(media["duration"])
+        if retimed:
+            sp = want[3]
+            inpoint, mdur, sp = c["inpoint"] / sp, mdur / sp, 1.0
         span = c["duration"] * sp
         if not media.get("is_image"):
-            span = min(span, max(0.04, media["duration"] - c["inpoint"]))
-        clip = layer.add_asset(a, ns(c["start"]), 0 if media.get("is_image") else ns(c["inpoint"]), ns(span), types)
+            span = min(span, max(0.04, mdur - inpoint))
+        clip = layer.add_asset(a, ns(c["start"]), 0 if media.get("is_image") else ns(inpoint), ns(span), types)
         if clip is None:
             return None
         if abs(sp - 1.0) > 1e-6:
@@ -816,7 +893,7 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
             clip.set_duration(ns(c["duration"]))
         if track in ("video", "titles"):
             _effects(project, c, clip, media)
-        inp = 0 if media.get("is_image") else ns(c["inpoint"])
+        inp = 0 if media.get("is_image") else ns(inpoint)
         for vs in _children(clip, GES.VideoSource):
             ap = alpha_points(c, ex["alpha_in"], ex["alpha_out"])
             if ap:
