@@ -26,6 +26,9 @@ chroot /srv/jammy bash -c "cd /src/reel; DISPLAY=:$XD UI_TIMEOUT=1500 sh tests/r
 fi
 echo "== deb"
 sh $R/build-deb.sh /home/claude/out && ls -la /home/claude/out/folio-reel_${V}_all.deb
+echo "== X4-05: against the app it replaces"
+bash /home/claude/folio-suite/tools/compare-release.sh folio-reel /home/claude/folio-reel /home/claude/out/folio-reel_${V}_all.deb || \
+  echo "X4-05 FAILED: this candidate shows less than the app it replaces"
 for m in ${MACHINES:-/srv/jammy /srv/nolo /srv/noble}; do
   cp /home/claude/out/folio-reel_${V}_all.deb $m/tmp/
   flock /home/claude/.dpkg.lock chroot $m bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y -q /tmp/folio-reel_${V}_all.deb >/tmp/reel-install.log 2>&1 || tail -5 /tmp/reel-install.log; dpkg -l folio-reel | tail -1 | awk '{print \$1, \$3}'; folio-reel --version"
