@@ -76,6 +76,12 @@ class Project:
         self.listeners = []
         self.dirty = False
         self.snapping = True
+        self._batch = 0                 # edits inside a batch are one undo step (R9-29)
+        self._batch_made = False
+        self._batch_label = ""
+        self._saved = self._stamp()     # how the project read when it was last saved (R9-31)
+        self.missing = set()            # media whose file isn't there (R9-02)
+        self.refresh_missing()
 
     # ------------------------------------------------------------ change notification and undo
     def listen(self, fn):
@@ -86,9 +92,26 @@ class Project:
         for fn in list(self.listeners):
             fn(what)
 
+    def _stamp(self):
+        return hash(json.dumps(self.data, sort_keys=True, default=str))
+
+    def mark_saved(self):
+        self._saved = self._stamp()
+        self.dirty = False
+
+    def batch(self, label=""):
+        """with project.batch("Speed"): ... — every edit inside is one step for Undo (R9-29)."""
+        return _Batch(self, label)
+
     def checkpoint(self, label="", merge=None):
         """Before an edit: remember how things were, for Undo. merge: a key; another change with the
         same key straight after (a slider being dragged) joins this undo step."""
+        if self._batch:
+            if self._batch_made:
+                return
+            self._batch_made = True
+            label = self._batch_label or label
+            merge = None
         now = time.monotonic()
         last = getattr(self, "_merge", None)
         self._merge = (merge, now) if merge is not None else None
@@ -120,6 +143,7 @@ class Project:
         self.redo_stack.append((label, copy.deepcopy(self.data)))
         self.data = data
         self._changed("all")
+        self.dirty = self._stamp() != self._saved        # back as it was saved: nothing to save (R9-31)
         return label
 
     def redo(self):
@@ -130,6 +154,7 @@ class Project:
         self.undo_stack.append((label, copy.deepcopy(self.data)))
         self.data = data
         self._changed("all")
+        self.dirty = self._stamp() != self._saved
         return label
 
     # ------------------------------------------------------------ settings
@@ -172,6 +197,36 @@ class Project:
         self.data["media"].append(dict(info))
         self._changed("media")
         return info
+
+    def refresh_missing(self):
+        """Look again for the media files: which are not there (R9-02)."""
+        self.missing = {m["uri"] for m in self.data.get("media", [])
+                        if uri_to_path(m["uri"]) and not os.path.exists(uri_to_path(m["uri"]))}
+        return self.missing
+
+    def relink_media(self, uri, info):
+        """Point a media entry, and every clip made from it, at another file (R9-02). info is what
+        the new file is (engine.probe). Clips keep their place; one that would now run past the end
+        of a shorter file is shortened."""
+        m = self.media_by_uri(uri)
+        if m is None:
+            raise EditError("no such media")
+        other = self.media_by_uri(info["uri"])
+        if other is not None and other is not m:
+            raise EditError("“%s” is already in this project." % other["name"])
+        self.checkpoint("Find File")
+        m.clear()
+        m.update(dict(info))
+        for c in self.all_clips():
+            if c.get("media") == uri:
+                c["media"] = info["uri"]
+                if not info.get("is_image"):
+                    most = max(0.04, (float(info["duration"]) - c["inpoint"]) / c.get("speed", 1.0))
+                    if c["duration"] > most:
+                        c["duration"] = most
+        self.refresh_missing()
+        self._changed("all")
+        return m
 
     def remove_media(self, uri):
         used = [c for c in self.all_clips() if c.get("media") == uri]
@@ -368,6 +423,8 @@ class Project:
             c["start"] = max(0.0, c["start"] + delta)
         for t in TRACKS:
             self._sort(t)
+        for t in ("video", "titles"):
+            self._settle(t)
         self._changed()
         return delta
 
@@ -519,6 +576,111 @@ class Project:
                     seen.add(other["id"])
                     self._sort(t)
         self._sort(track)
+
+    def _ripple(self, tracks, delta, at, exclude=()):
+        """Move everything starting at or after `at` on these tracks along by `delta`, and bring
+        each moved clip's grouped partners on the other tracks with it. Whatever the route, a clip
+        moves once: a picture and its sound, each on a track being rippled, are not carried twice
+        (R9-04), and a picture carried along takes its sound with it (R9-05)."""
+        if abs(delta) <= 1e-12:
+            return
+        for c in self._ripple_set(tracks, at, exclude)[0].values():
+            c["start"] = max(0.0, c["start"] + delta)
+        for t in TRACKS:
+            self._sort(t)
+
+    def _room(self, tracks, at, exclude=()):
+        """How far a ripple from `at` on these tracks can pull clips earlier before one of the
+        clips it carries on another track would land on something that is staying where it is."""
+        moved, reached = self._ripple_set(tracks, at, exclude)
+        ex = {id(c) for c in exclude}
+        room = float("inf")
+        for t in reached:
+            if t in tracks:
+                continue
+            starts = [c["start"] for c in self.data["tracks"][t] if c["id"] in moved]
+            if not starts:
+                continue
+            first = min(starts)
+            before = max([end_of(c) for c in self.data["tracks"][t]
+                          if c["id"] not in moved and id(c) not in ex and c["start"] < first] or [0.0])
+            room = min(room, max(0.0, first - before))
+        return room
+
+    def _ripple_set(self, tracks, at, exclude=()):
+        """({id: clip} a ripple from `at` on these tracks would move, the tracks it reaches). A
+        track that holds the partner of a clip being moved is rippled from the same point as well:
+        the tracks a film's pictures and sounds share move as one, so nothing lands on a clip that
+        stayed behind."""
+        ex = {id(c) for c in exclude}
+        tracks = list(tracks)
+        moved = {}
+        grew = True
+        while grew:
+            grew = False
+            for track in tracks:
+                for c in self.data["tracks"][track]:
+                    if id(c) in ex or c["id"] in moved:
+                        continue
+                    if c["start"] >= at - EPS:
+                        moved[c["id"]] = c
+                        grew = True
+            for c in list(moved.values()):
+                for other in self.group_members(c.get("group")):
+                    if id(other) in ex:
+                        continue
+                    t = self.find(other["id"])[0]
+                    if t not in tracks:
+                        tracks.append(t)
+                        grew = True
+                    if other["id"] not in moved:
+                        moved[other["id"]] = other
+                        grew = True
+        return moved, tracks
+
+    def _overlap_in(self, track, c):
+        """How far a clip reaches back over the one before it by its own transition."""
+        tr = c.get("transition")
+        if not tr or tr.get("type") == "dip-black" or track not in ("video", "titles"):
+            return 0.0
+        return float(tr.get("duration", 0.0))
+
+    def _settle(self, track):
+        """After an edit on a picture track: every transition sits exactly over the join it belongs
+        to, and no two clips overlap without one (R9-13). A transition whose clips have come apart,
+        or whose clip is now first on the track, is taken off; an overlap that is too deep or has
+        no transition is undone by moving the later clips along."""
+        if track not in ("video", "titles"):
+            return
+        lst = self.data["tracks"][track]
+        self._sort(track)
+        for i in range(len(lst)):
+            c = lst[i]
+            tr = c.get("transition")
+            if i == 0:
+                if tr:
+                    c["transition"] = None
+                continue
+            prev = lst[i - 1]
+            if tr and tr.get("type") != "dip-black":
+                d = max(0.1, min(float(tr["duration"]), c["duration"] / 2.0, prev["duration"] / 2.0))
+                gap = c["start"] - end_of(prev)
+                if gap > 0.05 or min(c["duration"], prev["duration"]) < 0.2:
+                    c["transition"] = None          # the two clips came apart, or are too short for one
+                    if gap < -EPS:
+                        self._ripple([track], -gap, c["start"])
+                        lst = self.data["tracks"][track]
+                    continue
+                tr["duration"] = d
+                want = end_of(prev) - d
+            else:
+                if tr:          # fade to black: no overlap, and no longer than the clips it joins
+                    tr["duration"] = max(0.1, min(float(tr["duration"]), c["duration"], prev["duration"]))
+                want = max(c["start"], end_of(prev))
+            diff = want - c["start"]
+            if abs(diff) > EPS:
+                self._ripple([track], diff, c["start"])
+                lst = self.data["tracks"][track]
 
     def _first_free(self, track, at, length):
         """The first start at or after `at` where `length` fits on the track."""
@@ -714,6 +876,18 @@ class Project:
         self._sort(track)
         return b
 
+    def _in_transition(self, track, c, t):
+        """True where time t falls inside a transition into or out of clip c (R9-13)."""
+        if track not in ("video", "titles"):
+            return False
+        d = self._overlap_in(track, c)
+        if d and t < c["start"] + d - EPS:
+            return True
+        nxt = self.neighbours(c["id"])[1]
+        if nxt is not None and self._overlap_in(track, nxt) and t > nxt["start"] + EPS:
+            return True
+        return False
+
     def split(self, cid, t):
         """Split at time t (R3-01). Returns the new (second) clip."""
         track, c = self.find(cid)
@@ -721,8 +895,11 @@ class Project:
             raise EditError("no such clip")
         if not (c["start"] + 0.04 <= t <= end_of(c) - 0.04):
             raise EditError("The playhead isn't over that clip.")
+        if self._in_transition(track, c, t):
+            raise EditError("The playhead is inside a transition: split before or after it.")
         self.checkpoint("Split")
         b = self._split(track, c, t)
+        self._regroup_halves([b])
         self._changed()
         return b
 
@@ -732,12 +909,45 @@ class Project:
                and c["start"] + 0.04 <= t <= end_of(c) - 0.04]
         if not hit:
             raise EditError("There's no clip under the playhead to split.")
+        clear = [c for c in hit if not self._in_transition(self.find(c["id"])[0], c, t)]
+        if not clear:
+            raise EditError("The playhead is inside a transition: split before or after it.")
+        if len(clear) < len(hit):
+            # the picture is mid-transition: leave its own sound whole as well, so the pair stays a pair
+            skip = {c.get("group") for c in hit if c not in clear} - {None}
+            clear = [c for c in clear if c.get("group") not in skip]
+            if not clear:
+                raise EditError("The playhead is inside a transition: split before or after it.")
+        hit = clear
         self.checkpoint("Split")
         out = []
         for c in hit:
             out.append(self._split(self.find(c["id"])[0], c, t))
+        self._regroup_halves(out)
         self._changed()
         return out
+
+    def _regroup_halves(self, halves):
+        """The second halves of a split are a group of their own: a picture and its sound split
+        together stay a pair, but the two sides of the cut can be moved apart (before this, all
+        four pieces stayed one group and moved as one)."""
+        fresh, count = {}, {}
+        for b in halves:
+            if b.get("group"):
+                count[b["group"]] = count.get(b["group"], 0) + 1
+        for b in halves:
+            g = b.get("group")
+            if not g:
+                continue
+            if count[g] < 2:
+                b.pop("group", None)
+            else:
+                b["group"] = fresh.setdefault(g, self._new_id())
+        # a first half left alone in its group is on its own too
+        for g in count:
+            left = self.group_members(g)
+            if len(left) == 1:
+                left[0].pop("group", None)
 
     def delete(self, ids, ripple=False):
         """Delete clips; ripple=True closes the gap they leave (R3-01 ripple delete)."""
@@ -750,16 +960,73 @@ class Project:
             if c is None:
                 continue
             nxt = self.neighbours(cid)[1]
+            # the gap this clip leaves: from where the clip before it ends to where the next one
+            # starts once its own transition is off (R9-13)
+            prev = self.neighbours(cid)[0]
+            d_in = max(0.0, end_of(prev) - c["start"]) if prev is not None else 0.0
+            d_out = max(0.0, end_of(c) - nxt["start"]) if nxt is not None else 0.0
             self.data["tracks"][track].remove(c)
             if nxt is not None and nxt.get("transition"):
                 nxt["transition"] = None
-            gone.append((track, c))
+            gone.append((track, c["start"] + d_in, max(0.0, c["duration"] - d_in - d_out),
+                         (nxt["start"] if nxt is not None else end_of(c))))
         if ripple:
-            # each track closes its own gap, and partners are not dragged along as well: a pair
-            # deleted together leaves the same gap on both tracks and stays in step (R5-05)
-            for track, c in sorted(gone, key=lambda tc: -tc[1]["start"]):
-                self._shift(track, -c["duration"], c["start"], mirror=False)
+            # Gaps that are the same on several tracks (a picture and its sound deleted together)
+            # close together, once. A gap on one track alone still carries the later clips'
+            # partners on the other tracks, so a picture and its sound stay together (R9-05).
+            groups = {}
+            for track, start, length, at in gone:
+                groups.setdefault((round(start, 4), round(length, 4)), []).append((track, at))
+            for (start, length), where in sorted(groups.items(), key=lambda kv: -kv[0][0]):
+                tracks = sorted({t for t, _a in where})
+                at = min(a for _t, a in where)
+                # the gap closes as far as the tracks carried along have room for
+                self._ripple(tracks, -min(length, self._room(tracks, at)), at)
+        for t in ("video", "titles"):
+            self._settle(t)
         self._changed()
+
+    def move_many(self, ids, delta, tolerance=0.0, playhead=None):
+        """Slide several clips (and their groups) along together, keeping their spacing and their
+        tracks (R9-26). Nothing moves unless every one of them can."""
+        ids = self.expand_groups(list(ids))
+        members = sorted([c for c in self.all_clips() if c["id"] in ids], key=lambda c: c["start"])
+        if not members:
+            raise EditError("no such clips")
+        first = members[0]
+        start = max(0.0, first["start"] + delta)
+        if tolerance:
+            last_end = max(end_of(c) for c in members)
+            extra = [playhead] if playhead is not None else []
+            span = last_end - first["start"]
+            s1 = self.snap(start, tolerance, exclude=ids, extra=extra)
+            s2 = self.snap(start + span, tolerance, exclude=ids, extra=extra) - span
+            moved = [s for s in (s1, s2) if abs(s - start) > 1e-9]
+            if moved:
+                start = min(moved, key=lambda s: abs(s - start))
+        delta = start - first["start"]
+        if abs(delta) < EPS:
+            return 0.0
+        idset = set(ids)
+        for c in members:
+            at = c["start"] + delta
+            if at < -EPS:
+                raise EditError("The clips would run off the start of the timeline.")
+            track = self.find(c["id"])[0]
+            for x in self.data["tracks"][track]:
+                if x["id"] in idset:
+                    continue
+                if not (end_of(x) <= at + EPS or x["start"] >= at + c["duration"] - EPS):
+                    raise EditError("Something is in the way of the clips there.")
+        self.checkpoint("Move")
+        for c in members:
+            c["start"] = max(0.0, c["start"] + delta)
+        for t in TRACKS:
+            self._sort(t)
+        for t in ("video", "titles"):
+            self._settle(t)
+        self._changed()
+        return delta
 
     def move(self, cid, start, track=None, tolerance=0.0, playhead=None, solo=False):
         """Move a clip (optionally to another track). It snaps to clip edges and the playhead, and
@@ -806,6 +1073,8 @@ class Project:
         c["start"] = max(0.0, start)
         lst.append(c)
         self._sort(track)
+        for t in {old_track, track}:
+            self._settle(t)
         self._changed()
         return c
 
@@ -817,6 +1086,19 @@ class Project:
         self.checkpoint("Paste")
         out = []
         regroup = {}       # a pasted group is a group of its own, not the one copied from (R4-06)
+        # One place for the whole paste, so the clips keep their spacing: a picture and its sound
+        # that each went to "the first free place" of their own could land apart (R9-14).
+        at = max(0.0, at)
+        for _try in range(60):
+            push = 0.0
+            for it in items:
+                want = at + it["offset"]
+                got = self._first_free(it["track"], want, it["clip"]["duration"])
+                push = max(push, got - want)
+            if push <= EPS:
+                break
+            at += push
+        renamed = {}
         for it in sorted(items, key=lambda x: x["offset"]):
             c = copy.deepcopy(it["clip"])
             if c.get("group"):
@@ -825,13 +1107,23 @@ class Project:
                 if not it.get("media"):
                     continue
                 self.data["media"].append(copy.deepcopy(it["media"]))
+            old_id = c["id"]
             c["id"] = self._new_id()
+            renamed[old_id] = c["id"]
             c["transition"] = None
             track = it["track"]
             c["start"] = self._first_free(track, max(0.0, at + it["offset"]), c["duration"])
             self.data["tracks"][track].append(c)
             self._sort(track)
             out.append(c)
+        # a copy knows its own partner, never the clip it was copied from (R9-14)
+        for c in out:
+            for key in ("sound_clip", "picture_clip"):
+                if key in c:
+                    if c[key] in renamed:
+                        c[key] = renamed[c[key]]
+                    else:
+                        c.pop(key)
         self._changed("all" if any(it.get("media") for it in items) else "timeline")
         return out
 
@@ -851,30 +1143,46 @@ class Project:
         together = [] if solo else [
             m for m in self.group_members(c.get("group")) if m["id"] != cid
             and abs(m["start"] - c["start"]) <= EPS and abs(m["duration"] - c["duration"]) <= EPS]
+        # the edge goes only as far as every clip trimmed with it can follow: a picture stopped by
+        # the next clip must not leave its sound running on past it
+        for m in together:
+            mp, mn = self.neighbours(m["id"])
+            t = self._trim_clamp(m, edge, t, mp, mn)
         got = self._trim_one(cid, c, edge, t, prev, nxt)
         for m in together:
             mp, mn = self.neighbours(m["id"])
             self._trim_one(m["id"], m, edge, got["start"] if edge == "start" else end_of(got), mp, mn)
+        for t in ("video", "titles"):
+            self._settle(t)
         self._changed()
         return got
+
+    def _trim_clamp(self, c, edge, t, prev, nxt):
+        """Where this clip's edge can actually go when asked for time t."""
+        sp = c.get("speed", 1.0)
+        m = self.media_by_uri(c["media"]) if c["kind"] == "media" else None
+        if edge == "start":
+            lo = end_of(prev) - self._overlap_in(self.find(c["id"])[0], c) if prev else 0.0
+            if m is not None and not m.get("is_image"):
+                lo = max(lo, c["start"] - c["inpoint"] / sp)
+            least = min(0.1, c["duration"])          # a clip already shorter than that stays as long (R9-32)
+            return min(max(t, lo), max(lo, end_of(c) - least))
+        hi = nxt["start"] + self._overlap_in(self.find(nxt["id"])[0], nxt) if nxt else float("inf")
+        hi = min(hi, c["start"] + self.max_duration(c))
+        least = c["start"] + min(0.1, c["duration"])
+        return max(min(t, hi), min(least, hi))
 
     def _trim_one(self, cid, c, edge, t, prev, nxt):
         track, _c = self.find(cid)
         sp = c.get("speed", 1.0)
+        t = self._trim_clamp(c, edge, t, prev, nxt)
         if edge == "start":
-            lo = end_of(prev) - (c["transition"]["duration"] if c.get("transition") else 0) if prev else 0.0
-            if c["kind"] == "media" and not self.media_by_uri(c["media"]).get("is_image"):
-                lo = max(lo, c["start"] - c["inpoint"] / sp)
-            t = min(max(t, lo), end_of(c) - 0.1)
             delta = t - c["start"]
             if c["kind"] == "media":
                 c["inpoint"] = max(0.0, c["inpoint"] + delta * sp)
             c["start"] = t
             c["duration"] -= delta
         else:
-            hi = nxt["start"] + (nxt["transition"]["duration"] if nxt and nxt.get("transition") else 0) if nxt else float("inf")
-            hi = min(hi, c["start"] + self.max_duration(c))
-            t = max(min(t, hi), c["start"] + 0.1)
             c["duration"] = t - c["start"]
         c["fade_in"] = min(c["fade_in"], c["duration"])
         c["fade_out"] = min(c["fade_out"], c["duration"])
@@ -882,7 +1190,14 @@ class Project:
         return c
 
     def trim_to_playhead(self, cid, t, edge):
-        """Ribbon Trim Start / Trim End: the clip's start (or end) moves to the playhead."""
+        """Ribbon Trim Start / Trim End: the clip's start (or end) moves to the playhead. The
+        playhead has to be over the clip: from outside it this used to cut the clip down to a
+        tenth of a second (R9-27)."""
+        _track, c = self.find(cid)
+        if c is None:
+            raise EditError("no such clip")
+        if not (c["start"] + 0.04 <= t <= end_of(c) - 0.04):
+            raise EditError("Move the playhead over “%s” first." % c["name"])
         return self.trim(cid, edge, t)
 
     def set(self, cid, label="Change", merge=False, **props):
@@ -914,25 +1229,36 @@ class Project:
         speed = max(0.25, min(4.0, float(speed)))
         self.checkpoint("Speed")
         # a picture and the sound split off it run at the same speed, or they stop lining up (R5-05)
-        for m2 in ([] if solo else self.group_members(c.get("group"))):
-            if m2["id"] != cid and m2["kind"] == "media" and abs(m2["start"] - c["start"]) <= EPS \
-                    and abs(m2["duration"] - c["duration"]) <= EPS:
-                self._speed_one(m2["id"], m2, speed)
-        return self._speed_one(cid, c, speed)
+        both = [c] + [m2 for m2 in ([] if solo else self.group_members(c.get("group")))
+                      if m2["id"] != cid and m2["kind"] == "media" and abs(m2["start"] - c["start"]) <= EPS
+                      and abs(m2["duration"] - c["duration"]) <= EPS]
+        old_end = end_of(c)
+        at = old_end
+        for x in both:
+            nxt = self.neighbours(x["id"])[1]
+            if nxt is not None and nxt["start"] < at:      # the next clip reaches back over this one
+                at = nxt["start"]
+        old = c["duration"]
+        for x in both:
+            self._speed_one(x, speed)
+        # everything after moves once, whichever tracks the pair is on (R9-04)
+        tracks = sorted({self.find(x["id"])[0] for x in both})
+        delta = c["duration"] - old
+        if delta < 0:
+            delta = -min(-delta, self._room(tracks, at, both))
+        self._ripple(tracks, delta, at, exclude=both)
+        for t in tracks:
+            self._settle(t)
+        self._changed()
+        return c
 
-    def _speed_one(self, cid, c, speed):
-        track, _c = self.find(cid)
+    def _speed_one(self, c, speed):
         m = self.media_by_uri(c["media"])
         span = c["duration"] * c["speed"]                # how much of the media the clip shows
-        if not m.get("is_image"):
+        if m is not None and not m.get("is_image"):
             span = min(span, float(m["duration"]) - c["inpoint"])
-        new = span / speed
-        delta = new - c["duration"]
-        old_end = end_of(c)
         c["speed"] = speed
-        c["duration"] = new
-        self._shift(track, delta, old_end, exclude=c)
-        self._changed()
+        c["duration"] = span / speed
         return c
 
     def set_transition(self, cid, kind, duration=1.0):
@@ -955,13 +1281,16 @@ class Project:
             gap = c["start"] - end_of(prev)
             if gap > 0.05 and kind != "dip-black":
                 raise EditError("The two clips must touch for a transition: close the gap first.")
-            duration = max(0.1, min(float(duration), c["duration"] / 2, prev["duration"] / 2 + shift))
+            if min(c["duration"], prev["duration"]) < 0.2 and not old:
+                raise EditError("Those clips are too short for a transition.")
+            duration = max(0.1, min(float(duration), c["duration"] / 2, prev["duration"] / 2))
             new_shift = duration if kind != "dip-black" else 0.0
             c["transition"] = {"type": kind, "duration": duration}
         delta = shift - new_shift
         if abs(delta) > EPS:
-            self._shift(track, delta, c["start"])
+            self._ripple([track], delta, c["start"])
         self._sort(track)
+        self._settle(track)
         self._changed()
         return c
 
@@ -973,9 +1302,18 @@ class Project:
     def duck_points(self, music, level=0.3, ramp=0.4):
         """Where the music dips: under every clip on the Audio track (speech, voice-over).
         Returns [(t in the clip, gain)]."""
+        # Speech is what was put on the Audio track on purpose: a voice-over, an interview's sound.
+        # A picture's own sound, which sits there too since R5-05, is not: counting it kept the
+        # music down for the whole film (R9-28).
+        own = set()
+        for name in ("video", "titles"):
+            for pic in self.data["tracks"][name]:
+                snd = self.sound_partner(pic["id"]) if pic.get("sound_elsewhere") else None
+                if snd is not None:
+                    own.add(snd["id"])
         speech = []
         for x in self.data["tracks"]["audio"]:
-            if not x.get("muted"):
+            if not x.get("muted") and x["id"] not in own:
                 speech.append((x["start"], end_of(x)))
         speech.sort()
         merged = []
@@ -1020,22 +1358,33 @@ class Project:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(self.to_json())
         os.replace(tmp, path)
-        self.dirty = False
+        self.mark_saved()
 
     @classmethod
     def load(cls, path):
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict) or "tracks" not in data:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except UnicodeDecodeError:
             raise EditError("That isn't a Folio Reel project.")
+        except ValueError:
+            raise EditError("That isn't a Folio Reel project, or the file is damaged.")
+        data = check_project(data)
         base = os.path.dirname(os.path.abspath(path))
         uri_map = {}
         for m in data.get("media", []):
             # media moved along with the project (e.g. a folder copied to another computer)
             p = uri_to_path(m["uri"])
             rel = m.pop("relative", None)
-            if p and not os.path.exists(p) and rel and os.path.exists(os.path.join(base, rel)):
-                new = path_to_uri(os.path.normpath(os.path.join(base, rel)))
+            if not p or os.path.exists(p):
+                continue
+            found = None
+            if rel and os.path.exists(os.path.join(base, rel)):
+                found = os.path.normpath(os.path.join(base, rel))
+            elif os.path.exists(os.path.join(base, os.path.basename(p))):
+                found = os.path.join(base, os.path.basename(p))      # beside the project, by name (R9-02)
+            if found:
+                new = path_to_uri(found)
                 uri_map[m["uri"]] = new
                 m["uri"] = new
         for t in data["tracks"].values():
@@ -1045,10 +1394,125 @@ class Project:
                 for k, v in clip_defaults().items():
                     c.setdefault(k, copy.deepcopy(v))
         p = cls(data, path)
+        p.mark_saved()
         return p
 
     def missing_media(self):
-        return [m for m in self.data["media"] if uri_to_path(m["uri"]) and not os.path.exists(uri_to_path(m["uri"]))]
+        self.refresh_missing()
+        return [m for m in self.data["media"] if m["uri"] in self.missing]
+
+    def missing_clips(self):
+        """Clips whose media file is not there, or is not in the bin at all."""
+        return [c for c in self.all_clips() if c["kind"] == "media"
+                and (c.get("media") in self.missing or self.media_by_uri(c.get("media")) is None)]
+
+
+class _Batch:
+    def __init__(self, project, label):
+        self.p, self.label = project, label
+
+    def __enter__(self):
+        p = self.p
+        if p._batch == 0:
+            p._batch_made = False
+            p._batch_label = self.label
+        p._batch += 1
+        return p
+
+    def __exit__(self, *exc):
+        self.p._batch -= 1
+        if self.p._batch == 0:
+            self.p._merge = None
+        return False
+
+
+def _number(v, default=None):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if f == f and abs(f) != float("inf") else default
+
+
+def check_project(data):
+    """A project read from a file, made safe to work with, or EditError if it is not one (R9-15).
+    Missing settings get their usual values; a clip that cannot be placed is left out."""
+    if not isinstance(data, dict) or not isinstance(data.get("tracks"), dict):
+        raise EditError("That isn't a Folio Reel project.")
+    w, h, fps = _number(data.get("width")), _number(data.get("height")), _number(data.get("fps"))
+    data["width"] = int(w) if w and w >= 16 else 1920
+    data["height"] = int(h) if h and h >= 16 else 1080
+    data["fps"] = int(fps) if fps and 1 <= fps <= 240 else 30
+    media = [m for m in (data.get("media") if isinstance(data.get("media"), list) else [])
+             if isinstance(m, dict) and isinstance(m.get("uri"), str)]
+    for m in media:
+        m.setdefault("name", os.path.basename(uri_to_path(m["uri"]) or m["uri"]))
+        m["duration"] = _number(m.get("duration"), IMAGE_SECONDS) or IMAGE_SECONDS
+    data["media"] = media
+    seen, top = set(), 0
+    for name in list(data["tracks"]):
+        if name not in TRACKS:
+            del data["tracks"][name]
+    for name in TRACKS:
+        good = []
+        lst = data["tracks"].get(name)
+        for c in (lst if isinstance(lst, list) else []):
+            if not isinstance(c, dict):
+                continue
+            start, dur = _number(c.get("start")), _number(c.get("duration"))
+            kind = c.get("kind")
+            if start is None or dur is None or dur <= 0 or kind not in ("media", "title", "lower-third", "caption"):
+                continue
+            if kind == "media" and not isinstance(c.get("media"), str):
+                continue
+            cid = c.get("id")
+            if not isinstance(cid, int) or cid in seen:
+                cid = None
+            c["start"], c["duration"] = max(0.0, start), dur
+            c["inpoint"] = max(0.0, _number(c.get("inpoint"), 0.0) or 0.0)
+            sp = _number(c.get("speed"), 1.0) or 1.0
+            c["speed"] = max(0.25, min(4.0, sp))
+            c.setdefault("name", kind.title())
+            if kind != "media":
+                c.setdefault("text", "")
+            tr = c.get("transition")
+            if tr is not None and not (isinstance(tr, dict) and isinstance(tr.get("type"), str)
+                                       and _number(tr.get("duration"))):
+                c["transition"] = None
+            c["_id"] = cid
+            good.append(c)
+            if cid is not None:
+                seen.add(cid)
+                top = max(top, cid)
+        data["tracks"][name] = good
+    markers = []
+    for m in (data.get("markers") if isinstance(data.get("markers"), list) else []):
+        if isinstance(m, dict) and _number(m.get("t")) is not None:
+            m["t"] = max(0.0, _number(m["t"]))
+            m.setdefault("name", "")
+            if not isinstance(m.get("id"), int):
+                m["id"] = None
+            else:
+                top = max(top, m["id"])
+            markers.append(m)
+    data["markers"] = markers
+    for name in TRACKS:
+        for c in data["tracks"][name]:
+            if c.pop("_id") is None:
+                top += 1
+                c["id"] = top
+            g = c.get("group")
+            if isinstance(g, int):
+                top = max(top, g)
+        data["tracks"][name].sort(key=lambda c: (c["start"], c["id"]))
+    for m in markers:
+        if m["id"] is None:
+            top += 1
+            m["id"] = top
+    nid = data.get("next_id")
+    data["next_id"] = max(nid if isinstance(nid, int) else 0, top + 1)
+    data.setdefault("version", 1)
+    return data
 
 
 def uri_to_path(uri):
@@ -1082,6 +1546,8 @@ def parse_time(text, fps=None):
     secs = 0.0
     for n in nums:
         secs = secs * 60 + n
+    if secs != secs or secs == float("inf"):
+        return None
     return max(0.0, secs)
 
 

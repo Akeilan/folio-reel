@@ -41,6 +41,10 @@ class ReelWindow(Gtk.ApplicationWindow):
         self._alt_alone = False
         self.exports = []
         self.export_queue = []        # exports waiting their turn (R4-08)
+        self._copying = set()         # media whose lossless sound is being made (R9-11)
+        self._said_bad = None
+        import uuid
+        self.recovery_id = uuid.uuid4().hex
         self.recorder = None
         self.full = None
         geo = app.settings.get("window", {})
@@ -122,6 +126,8 @@ class ReelWindow(Gtk.ApplicationWindow):
         self.mediabin.refresh()
         GLib.idle_add(lambda: (self.vpaned.set_position(max(250, self.vpaned.get_allocated_height() - 260)), False)[1])
         GLib.idle_add(self.focus_document)
+        from . import recovery
+        self._recovery_timer = GLib.timeout_add_seconds(recovery.every(), self._keep_recovery)
 
     # ------------------------------------------------------------ pieces
     def _transport(self):
@@ -338,19 +344,31 @@ class ReelWindow(Gtk.ApplicationWindow):
         if self.preview is not None:
             self._detach_preview_widget()
             self.preview.close()
-        self.preview = engine.Preview(self.project, on_event=self._preview_event)
+        self.preview_widget = None
+
+        def attach(w):
+            if w is None:
+                w = Gtk.Label(label="The preview needs GStreamer's GTK sink (gstreamer1.0-gtk3).")
+            self.preview_widget = w
+            self.preview_frame.add(w)
+            w.show()
+        self.preview = engine.Preview(self.project, on_event=self._preview_event, on_widget=attach)
         q = self.app.settings.get("preview_quality", 1)
         if q in (2, 4):
             self.preview.set_quality(q)
         if self.app.settings.get("use_proxies", False):
             self.preview.set_proxies(True)
-        w = self.preview.widget
-        if w is None:
-            w = Gtk.Label(label="The preview needs GStreamer's GTK sink (gstreamer1.0-gtk3).")
-        self.preview_widget = w
-        self.preview_frame.add(w)
-        w.show()
+        if self.preview_widget is None:
+            attach(None)
         self._fit_aspect()
+        # the picture widget joined after the pipeline had already settled, so it has no frame to
+        # show until something moves: ask for the frame again once it is on screen (R9-30)
+        GLib.timeout_add(250, self._show_frame_again)
+
+    def _show_frame_again(self):
+        if self.preview is not None and not self.playing and not self.preview.building:
+            self.preview.seek(min(self.playhead, self.project.duration()))
+        return False
 
     def _detach_preview_widget(self):
         w = getattr(self, "preview_widget", None)
@@ -543,7 +561,16 @@ class ReelWindow(Gtk.ApplicationWindow):
                 self.pause()
             self.preview.refresh()
             self.preview.seek(min(self.playhead, self.project.duration()))
+            self._say_bad()
         return False
+
+    def _say_bad(self):
+        """Tell the person, once, about clips whose file can't be played here (R9-03)."""
+        bad = tuple(getattr(self.preview, "bad", None) or ())
+        if bad and bad != self._said_bad:
+            self.notice("%s can't be read on this computer, so %s left out of the film."
+                        % (", ".join("“%s”" % n for n in bad[:3]), "it is" if len(bad) == 1 else "they are"), 30)
+        self._said_bad = bad
 
     def flush(self):
         """Bring the preview up to date now (tests, export)."""
@@ -578,27 +605,97 @@ class ReelWindow(Gtk.ApplicationWindow):
             return
         try:
             p = model.Project.load(path)
-        except (OSError, ValueError, KeyError) as e:
+        except model.EditError as e:
             self.message("“%s” couldn't be opened." % os.path.basename(path), str(e), Gtk.MessageType.ERROR)
-            return
+            return False
+        except Exception as e:      # noqa: BLE001 — whatever is wrong with the file, say so (R9-15)
+            self.message("“%s” couldn't be opened." % os.path.basename(path), str(e), Gtk.MessageType.ERROR)
+            return False
+        self.adopt(p, os.path.abspath(path))
+        self.app.add_recent(self.path)
+        return True
+
+    def adopt(self, p, path, changed=False):
+        """Make a loaded project this window's (Open, and a recovered project)."""
         self.pause()
+        # media from an older Reel: learn the shape of its pixels and which way up it is (R9-17)
+        learned = False
+        for m in p.media:
+            if "par" not in m:
+                got = engine.shape(m)
+                if got:
+                    m.update(got)
+                    learned = True
+        if learned and not changed:
+            p.mark_saved()
         self.project = p
         p.listen(self._changed)
-        self.path = os.path.abspath(path)
-        self.app.add_recent(self.path)
+        p.dirty = bool(changed)
+        self.path = path
         self.timeline.selected = []
         self.timeline.thumbs.clear()
         self.playhead = 0.0
-        self._new_preview()
+        self._said_bad = None
+        try:
+            self._new_preview()
+        except Exception as e:      # noqa: BLE001
+            self.notice("The preview couldn't start: %s" % e, 30)
         self.mediabin.refresh()
         self.clipset.refresh()
         self.timeline.zoom_fit()
         self.update_title()
         self._after_seek()
-        missing = p.missing_media()
+        self._say_bad()
+        self.say_missing()
+        self._start_sound_copies([m for m in p.media if any(c.get("media") == m["uri"] for c in p.all_clips())])
+
+    def say_missing(self):
+        """Name the media files that aren't where the project left them (R9-02)."""
+        missing = self.project.missing_media()
         if missing:
-            self.notice("%d media file%s couldn't be found: %s" % (len(missing), "" if len(missing) == 1 else "s",
-                                                                   ", ".join(os.path.basename(m) for m in missing[:3])), 20)
+            self.notice("%d media file%s couldn't be found: %s. %s marked on the timeline; right-click %s in "
+                        "the Media bin and choose Find File." % (
+                            len(missing), "" if len(missing) == 1 else "s",
+                            ", ".join(m["name"] for m in missing[:3]) + ("…" if len(missing) > 3 else ""),
+                            "Its clips are" if len(missing) == 1 else "Their clips are",
+                            "it" if len(missing) == 1 else "one"), 40)
+        return missing
+
+    def cmd_find_media(self, arg=None):
+        """Point a bin item at its file again, wherever it has gone (R9-02)."""
+        uris = self.mediabin.selected_uris()
+        if not uris:
+            self.notice("Choose the media in the bin first.")
+            return None
+        m = self.project.media_by_uri(uris[0])
+        if m is None:
+            return None
+        path = arg
+        if path is None:
+            fc = self._chooser("Find “%s”" % m["name"], Gtk.FileChooserAction.OPEN,
+                               filters=[("Video, sound and pictures", MEDIA_TYPES), ("All files", ["*"])])
+            ok = fc.run() == Gtk.ResponseType.ACCEPT
+            path = fc.get_filename() if ok else None
+            fc.destroy()
+        if not path:
+            return None
+        try:
+            info = engine.probe(path)
+        except Exception as e:      # noqa: BLE001
+            self.notice("That file can't be used: %s" % e, 15)
+            return None
+        old = dict(m)
+        if bool(old.get("is_image")) != bool(info.get("is_image")) or \
+                (bool(old.get("has_video")) and not info.get("has_video") and not info.get("is_image")):
+            self.notice("“%s” isn't the same kind of media as “%s”." % (info["name"], old["name"]), 15)
+            return None
+        got = self.edit(lambda p: p.relink_media(old["uri"], info))
+        if got is not None:
+            self.mediabin._thumbs.pop(old["uri"], None)
+            self.timeline.thumbs.clear()
+            self._reshow()
+            self.notice("“%s” found." % info["name"])
+        return got
 
     def new_project(self, aspect=None):
         if not self.is_blank():
@@ -606,12 +703,12 @@ class ReelWindow(Gtk.ApplicationWindow):
             if aspect:
                 win.run("aspect:" + aspect)
                 win.project.undo_stack.clear()
-                win.project.dirty = False
+                win.project.mark_saved()
             return win
         if aspect:
             self.run("aspect:" + aspect)
             self.project.undo_stack.clear()
-            self.project.dirty = False
+            self.project.mark_saved()
         return self
 
     def save(self, path=None):
@@ -629,6 +726,25 @@ class ReelWindow(Gtk.ApplicationWindow):
         self.app.add_recent(self.path)
         self.update_title()
         self.notice("Saved.")
+        from . import recovery
+        recovery.clear(self.recovery_id)
+        return True
+
+    def _keep_recovery(self):
+        """While there are unsaved changes, keep a copy that a crash can't take (asked for with
+        Backlog 9). It goes when the project is saved or the window is closed properly."""
+        from . import recovery
+        try:
+            if self.project.dirty and (self.project.undo_stack or self.path or getattr(self.project, "recovered", False)):
+                stamp = self.project._stamp()
+                if stamp != getattr(self, "_recovery_stamp", None):
+                    recovery.write(self.recovery_id, self.doc_name(), self.path, self.project.to_json())
+                    self._recovery_stamp = stamp
+            else:
+                recovery.clear(self.recovery_id)
+                self._recovery_stamp = None
+        except Exception:       # noqa: BLE001 — never in the way of the work
+            pass
         return True
 
     def _chooser(self, title, action, name=None, filters=()):
@@ -674,6 +790,9 @@ class ReelWindow(Gtk.ApplicationWindow):
     def import_uris(self, uris):
         """Put files in the media bin (R3-01). Returns their media entries."""
         out, bad = [], []
+        uris, strangers = self._files_of(uris)
+        for u in strangers:
+            bad.append("%s (not a file on this computer)" % (u if len(u) < 60 else u[:57] + "…"))
         for uri in uris:
             m = self.project.media_by_uri(uri)
             if m is None:
@@ -692,6 +811,54 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.notice("Imported %d file%s." % (len(out), "" if len(out) == 1 else "s"))
             self._mention_proxies(out)
         return out
+
+    def _files_of(self, uris, most=500):
+        """(file URIs, the ones that aren't files here). A folder gives the media inside it."""
+        import mimetypes
+        out, strangers = [], []
+        for uri in uris:
+            path = model.uri_to_path(uri)
+            if path is None:
+                strangers.append(uri)
+            elif os.path.isdir(path):
+                for root, dirs, files in os.walk(path):
+                    dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+                    for f in sorted(files):
+                        kind = mimetypes.guess_type(f)[0] or ""
+                        if kind.split("/")[0] in ("video", "audio", "image") and len(out) < most:
+                            out.append(model.path_to_uri(os.path.join(root, f)))
+            else:
+                out.append(uri)
+        return out, strangers
+
+    def _start_sound_copies(self, media):
+        """Make the lossless copy of each film's sound in the background (R9-11); the preview
+        picks it up when it is ready, and an export waits for any that are not."""
+        todo = [dict(m) for m in media if engine.wants_sound_copy(m) and m["uri"] not in self._copying
+                and engine.sound_copy(m["uri"]) is None and engine.have_ffmpeg()
+                and os.path.exists(model.uri_to_path(m["uri"]) or "")]
+        if not todo:
+            return 0
+        for m in todo:
+            self._copying.add(m["uri"])
+
+        def work():
+            for m in todo:
+                try:
+                    got = engine.make_sound_copy(m)
+                except Exception:       # noqa: BLE001
+                    got = None
+                GLib.idle_add(self._sound_copy_done, m["uri"], bool(got))
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        return len(todo)
+
+    def _sound_copy_done(self, uri, ok):
+        self._copying.discard(uri)
+        if ok and self.preview is not None and any(c.get("media") == uri for c in self.project.all_clips()) \
+                and not self.playing and self._refresh_id is None:
+            self._refresh_id = GLib.timeout_add(120, self._refresh_preview)
+        return False
 
     def _mention_proxies(self, media):
         """Big films play back heavily until there are small copies to preview from. Say so once a
@@ -753,6 +920,7 @@ class ReelWindow(Gtk.ApplicationWindow):
         if added:
             self.timeline.select(added)
             self.check_sound_in_step()
+            self._start_sound_copies([m for m in (self.project.media_by_uri(u) for u in uris) if m])
         return added
 
     def check_sound_in_step(self):
@@ -797,6 +965,32 @@ class ReelWindow(Gtk.ApplicationWindow):
             path += ext
         return self.start_export(path, fmt, preset)
 
+    def missing_warnings(self):
+        """Clips that will be left out of the film because their file isn't there (R9-02)."""
+        gone = self.project.missing_clips()
+        if not gone:
+            return []
+        names = sorted({c["name"] for c in gone})
+        return ["%d clip%s left out because %s missing: %s." % (
+            len(gone), " is" if len(gone) == 1 else "s are", "its file is" if len(gone) == 1 else "their files are",
+            ", ".join(names[:3]) + ("…" if len(names) > 3 else ""))]
+
+    def prepare_export(self):
+        """Before a film is rendered: make the copies it needs to come out exactly — speed
+        changes, steadying and straightening that haven't been rendered, and lossless sound
+        (R9-09, R9-11). The window keeps answering while it works."""
+        if not engine.to_prepare(self.project):
+            return 0
+
+        def progress(i, n, f, name):
+            self.notice("Getting ready to export: %d of %d (%s) %d%%" % (i + 1, n, name, int(f * 100)), 30)
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+        made = engine.prepare(self.project, progress)
+        if made:
+            self._reshow()
+        return made
+
     def picture_warnings(self):
         """What a person should be told about this film's picture before it is rendered, in plain
         words. Empty when there is nothing to say (R5-02)."""
@@ -834,7 +1028,7 @@ class ReelWindow(Gtk.ApplicationWindow):
 
     def confirm_picture(self):
         """Ask before rendering a film whose picture or sound is not what it should be (R5-02)."""
-        said = self.picture_warnings() + self.sound_warnings()
+        said = self.picture_warnings() + self.sound_warnings() + self.missing_warnings()
         if not said:
             return True
         d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
@@ -850,8 +1044,18 @@ class ReelWindow(Gtk.ApplicationWindow):
         return r == Gtk.ResponseType.OK
 
     def start_export(self, path, fmt, preset):
-        """Put an export in the queue. One runs at a time; the rest wait their turn (R4-08)."""
-        self.export_queue.append((path, fmt, preset))
+        """Put an export in the queue. One runs at a time; the rest wait their turn (R4-08). Each
+        film is the project as it stood when it was asked for: edits made while it waits belong to
+        the next one (R9-22)."""
+        used = engine.used_by(self.project, path)
+        if used is not None:
+            self.message("“%s” is a file this project uses." % os.path.basename(path),
+                         "Give the film another name: writing it there would replace its own footage.",
+                         Gtk.MessageType.ERROR)
+            return None
+        self.prepare_export()
+        snap = model.Project(copy.deepcopy(self.project.data))
+        self.export_queue.append((path, fmt, preset, snap))
         if self.exports:
             self.notice("%s is waiting its turn: %d in the queue." % (os.path.basename(path), len(self.export_queue)))
             self._export_progress()
@@ -862,12 +1066,15 @@ class ReelWindow(Gtk.ApplicationWindow):
         """Start the export at the head of the queue, if nothing is running."""
         if self.exports or not self.export_queue:
             return None
-        path, fmt, preset = self.export_queue.pop(0)
+        path, fmt, preset, snap = self.export_queue.pop(0)
         try:
-            ex = engine.Exporter(self.project, path, fmt, preset, on_progress=lambda f: self._export_progress(),
+            ex = engine.Exporter(snap, path, fmt, preset, on_progress=lambda f: self._export_progress(),
                                  on_done=lambda p, err, e=None: None)
         except model.EditError as e:
             self.message(str(e))
+            return self._next_export()
+        except GLib.Error as e:
+            self.message("The film couldn't be made.", e.message, Gtk.MessageType.ERROR)
             return self._next_export()
         ex.on_done = lambda p, err, ex=ex: self._export_done(ex, p, err)
         self.exports.append(ex)
@@ -906,6 +1113,9 @@ class ReelWindow(Gtk.ApplicationWindow):
                 self.notice("Exported %s — every frame of it is black." % name, 30)
             elif read and dark > read / 2:
                 self.notice("Exported %s — most of it is black." % name, 30)
+            elif getattr(ex, "bad", None):
+                self.notice("Exported %s — without %s, which can't be read on this computer."
+                            % (name, ", ".join("“%s”" % n for n in ex.bad[:3])), 30)
             else:
                 self.notice("Exported %s.%s" % (name, " %d still to go." % left if left else ""), 20)
         if self.export_queue:
@@ -1039,8 +1249,9 @@ class ReelWindow(Gtk.ApplicationWindow):
         sel = self.sel_or_say(what, kinds)
         if not sel:
             return
-        for c in sel:
-            self.edit(lambda p, c=c: fn(p, c))
+        with self.project.batch(label):         # however many clips, one step for Undo (R9-29)
+            for c in sel:
+                self.edit(lambda p, c=c: fn(p, c))
 
     def run(self, cmd):
         if cmd is None:
@@ -1441,8 +1652,9 @@ class ReelWindow(Gtk.ApplicationWindow):
         if not sel:
             return 0
         on = arg in ("on", "1", "true", "yes") if arg != "toggle" else not all(c.get("steady") for c in sel)
-        for c in sel:
-            self.edit(lambda p, c=c: p.set(c["id"], label="Steady", steady=on))
+        with self.project.batch("Steady"):
+            for c in sel:
+                self.edit(lambda p, c=c: p.set(c["id"], label="Steady", steady=on))
         if not on:
             self.notice("Steadying off; the clips play as they were filmed.")
             self._reshow()
@@ -1464,8 +1676,9 @@ class ReelWindow(Gtk.ApplicationWindow):
         except ValueError:
             self.notice("Straighten takes a number from -100 to 100.")
             return 0
-        for c in sel:
-            self.edit(lambda p, c=c: p.set(c["id"], label="Straighten", lens=v))
+        with self.project.batch("Straighten"):
+            for c in sel:
+                self.edit(lambda p, c=c: p.set(c["id"], label="Straighten", lens=v))
         if abs(v) < 1e-6:
             self.notice("Straightening off; the clips play as they were filmed.")
             self._reshow()
@@ -1547,9 +1760,10 @@ class ReelWindow(Gtk.ApplicationWindow):
             fc.destroy()
         if not path:
             return None
+        skipped = []
         try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                entries = subtitles.parse(f.read())
+            with open(path, "rb") as f:
+                entries = subtitles.parse(subtitles.decode(f.read()), skipped)
         except OSError as e:
             self.notice("Couldn't read %s: %s" % (os.path.basename(path), e))
             return None
@@ -1557,7 +1771,9 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.notice("There are no subtitles in that file.")
             return None
         made = self.edit(lambda p: p.add_subtitles(entries))
-        self.notice("%d subtitles added to the Titles track." % len(entries))
+        self.notice("%d subtitles added to the Titles track.%s" % (
+            len(entries), " %d couldn't be read and %s left out." % (len(skipped), "was" if len(skipped) == 1 else "were")
+            if skipped else ""), 15 if skipped else 8)
         return made
 
     def cmd_export_subtitles(self, path=None):
@@ -1588,16 +1804,25 @@ class ReelWindow(Gtk.ApplicationWindow):
     # transitions (R3-03)
     def cmd_transition(self, kind):
         sel = self.sel_or_say("the clip to transition into")
-        for c in sel:
-            dur = (c.get("transition") or {}).get("duration") or self.app.settings.get("transition_duration", 1.0)
-            self.edit(lambda p, c=c: p.set_transition(c["id"], None if kind == "none" else kind, dur))
+        if not sel:
+            return
+        # a picture's own sound is selected along with it: the transition is the picture's (R9-07)
+        pics = [c for c in sel if self.project.find(c["id"])[0] in ("video", "titles")]
+        if not pics:
+            self.notice("Transitions are for the Video and Titles tracks; on sound, use fades.")
+            return
+        with self.project.batch("Transition"):
+            for c in pics:
+                dur = (c.get("transition") or {}).get("duration") or self.app.settings.get("transition_duration", 1.0)
+                self.edit(lambda p, c=c: p.set_transition(c["id"], None if kind == "none" else kind, dur))
 
     def cmd_transition_duration(self, secs):
         self.app.settings["transition_duration"] = float(secs)
-        for c in self.timeline.selected_clips():
-            tr = c.get("transition")
-            if tr:
-                self.edit(lambda p, c=c, tr=tr: p.set_transition(c["id"], tr["type"], float(secs)))
+        with self.project.batch("Transition"):
+            for c in self.timeline.selected_clips():
+                tr = c.get("transition")
+                if tr:
+                    self.edit(lambda p, c=c, tr=tr: p.set_transition(c["id"], tr["type"], float(secs)))
 
     # effects
     def cmd_color(self, what):
@@ -1625,8 +1850,18 @@ class ReelWindow(Gtk.ApplicationWindow):
         sel = self.sel_or_say("a video or sound clip", kinds=("media",))
         if not sel:
             return 0
-        for c in sel:
-            self.edit(lambda p, c=c: p.set_speed(c["id"], float(x)))
+        done = set()
+        with self.project.batch("Speed"):
+            for c in sel:
+                if c["id"] in done:
+                    continue
+                # a picture and its sound change together: once, not once each (R9-04, R9-29)
+                for other in self.project.group_members(c.get("group")):
+                    if abs(other["start"] - c["start"]) <= model.EPS and abs(other["duration"] - c["duration"]) <= model.EPS:
+                        done.add(other["id"])
+                done.add(c["id"])
+                self.edit(lambda p, c=c: p.set_speed(c["id"], float(x)))
+        sel = [c for c in (self.project.clip(i) for i in sorted(done)) if c is not None]
         want, long, seen = [], [], set()
         for c in sel:
             now = self.project.clip(c["id"])
@@ -1645,9 +1880,44 @@ class ReelWindow(Gtk.ApplicationWindow):
         if want:
             self._render_fixes(want, "Changing the speed of")
         if long:
-            self.notice("“%s” is long, so its sound is stretched to fit for now. Choose Render "
-                        "Correction to make the speed exact." % long[0]["name"], seconds=12)
+            # long footage renders in the background; an export waits for it (R9-09)
+            self._render_later(long)
+            self.notice("“%s” is long: its new speed is being rendered in the background, and the "
+                        "preview is rough until that is done." % long[0]["name"], seconds=15)
+        else:
+            self.notice("Speed %g×." % float(x))
         return 1
+
+    def _render_later(self, clips):
+        """Render the copies these clips ask for on a thread, then show them (R9-09)."""
+        jobs = []
+        for c in clips:
+            m = self.project.media_by_uri(c["media"])
+            st = engine.fix_settings(c)
+            if m is not None and st is not None and engine.fixed_copy(c["media"], c) is None \
+                    and (m["uri"], st) not in self._copying:
+                self._copying.add((m["uri"], st))
+                jobs.append((dict(m), st))
+        if not jobs or not engine.have_ffmpeg():
+            return 0
+
+        def work():
+            for m, st in jobs:
+                try:
+                    got = engine.make_fix(m, st)
+                except Exception:       # noqa: BLE001
+                    got = None
+                GLib.idle_add(self._render_later_done, (m["uri"], st), m["name"], bool(got))
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+        return len(jobs)
+
+    def _render_later_done(self, key, name, ok):
+        self._copying.discard(key)
+        if ok:
+            self._reshow()
+            self.notice("“%s” is rendered at its new speed." % name)
+        return False
 
     def cmd_panzoom(self, how):
         self.each("Pan and Zoom", lambda p, c: p.set(c["id"], label="Pan and Zoom", panzoom=None if how == "none" else how),
@@ -1692,8 +1962,9 @@ class ReelWindow(Gtk.ApplicationWindow):
         d.destroy()
         self.crop_dialog = None
         if ok:
-            for c in sel:
-                self.edit(lambda p, c=c: p.set(c["id"], label="Crop", crop=vals))
+            with self.project.batch("Crop"):
+                for c in sel:
+                    self.edit(lambda p, c=c: p.set(c["id"], label="Crop", crop=vals))
 
     def cmd_fade_in(self, secs):
         self.each("Fade In", lambda p, c: p.set(c["id"], label="Fade In", fade_in=float(secs)))
@@ -1708,8 +1979,9 @@ class ReelWindow(Gtk.ApplicationWindow):
     def cmd_mute(self):
         sel = self.sel_or_say("a clip with sound", kinds=("media",))
         on = not all(c.get("muted") for c in sel)
-        for c in sel:
-            self.edit(lambda p, c=c: p.set(c["id"], label="Mute", muted=on))
+        with self.project.batch("Mute"):
+            for c in sel:
+                self.edit(lambda p, c=c: p.set(c["id"], label="Mute", muted=on))
 
     def cmd_music_bed(self):
         sel = [c for c in self.timeline.selected_clips() if self.project.find(c["id"])[0] == "music"]
@@ -1719,9 +1991,10 @@ class ReelWindow(Gtk.ApplicationWindow):
             self.notice("Put music on the Music track first; it then dips under speech on the Audio track.")
             return
         on = not all(c.get("music_bed") for c in sel)
-        for c in sel:
-            self.edit(lambda p, c=c: p.set(c["id"], label="Music Bed", music_bed=on))
-        self.notice("Music bed on: the music dips under the Audio track." if on else "Music bed off.")
+        with self.project.batch("Music Bed"):
+            for c in sel:
+                self.edit(lambda p, c=c: p.set(c["id"], label="Music Bed", music_bed=on))
+        self.notice("Music bed on: the music dips under voice-over on the Audio track." if on else "Music bed off.")
 
     def _kf_target(self):
         sel = self.sel_or_say("a clip with sound", kinds=("media",))
@@ -1908,6 +2181,12 @@ class ReelWindow(Gtk.ApplicationWindow):
             return False
         if typing:
             return False
+        if focus is not None and focus is not self.timeline.area and focus.is_ancestor(self.clipset) and \
+                low in ("left", "right", "up", "down", "home", "end", "page_up", "page_down", "delete", "backspace",
+                        "space", "return", "kp_enter", "kp_left", "kp_right"):
+            # a slider, a list or a tick box in Clip Settings has the keyboard: these keys are
+            # its own. Delete used to remove the clip being adjusted (R9-24).
+            return False
         if low == "space":
             self.toggle_play()
             return True
@@ -1974,7 +2253,7 @@ class ReelWindow(Gtk.ApplicationWindow):
             if r != Gtk.ResponseType.OK:
                 return True
             self.cancel_exports()
-        if self.project.dirty and (self.project.undo_stack or self.path):
+        if self.project.dirty and (self.project.undo_stack or self.path or getattr(self.project, "recovered", False)):
             d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
                                   buttons=Gtk.ButtonsType.NONE, text="Save changes to “%s”?" % self.doc_name())
             d.set_title(APP_NAME)
@@ -1995,7 +2274,21 @@ class ReelWindow(Gtk.ApplicationWindow):
         if self.full is not None:
             self.full.leave()
         if self.preview is not None:
+            # and no longer the window's: a timer or a finished background job that arrives after
+            # this must find nothing to rebuild (on GStreamer 1.24 touching a closed pipeline aborts)
             self.preview.close()
+            self.preview = None
+        if self._refresh_id is not None:
+            GLib.source_remove(self._refresh_id)
+            self._refresh_id = None
+        if self._seek_id is not None:
+            GLib.source_remove(self._seek_id)
+            self._seek_id = None
+        from . import recovery
+        recovery.clear(self.recovery_id)
+        if getattr(self, "_recovery_timer", None):
+            GLib.source_remove(self._recovery_timer)
+            self._recovery_timer = None
         self.app.window_closed(self)
         return False
 

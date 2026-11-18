@@ -8,9 +8,21 @@
 import os
 import sys
 
-from gi.repository import GLib, Gst
+import gi
+gi.require_version("Gst", "1.0")
+from gi.repository import GLib, Gst  # noqa: E402
 
-from . import engine, model
+from . import engine, model  # noqa: E402
+
+USAGE = """Folio Reel
+  folio-reel [PROJECT.reel]
+      open the editor
+  folio-reel --render PROJECT.reel OUT.mp4|OUT.webm [--preset 720p|1080p|4k] [--skip-missing]
+      make the film without a window. A project with media files missing is refused unless
+      --skip-missing is given; those clips are then left out.
+  folio-reel --render --raw WIDTHxHEIGHT FPS OUT.mp4|OUT.webm
+      encode raw BGRA frames from standard input
+  folio-reel --version"""
 
 
 def _say(msg):
@@ -24,8 +36,14 @@ def render(args):
     preset = None
     if "--preset" in args:
         i = args.index("--preset")
+        if i + 1 >= len(args):
+            _say("usage: folio-reel --render PROJECT.reel OUT.mp4 [--preset 1080p]")
+            return 2
         preset = args[i + 1]
         del args[i:i + 2]
+    skip_missing = "--skip-missing" in args
+    if skip_missing:
+        args.remove("--skip-missing")
     if "--raw" in args:
         i = args.index("--raw")
         try:
@@ -45,6 +63,14 @@ def render(args):
     except (OSError, ValueError, model.EditError) as e:
         _say("Can't open %s: %s" % (src, e))
         return 1
+    gone = project.missing_clips()
+    if gone:
+        names = ", ".join(sorted({c["name"] for c in gone})[:5])
+        if not skip_missing:
+            _say("%d clip(s) can't be rendered because their files are missing: %s.\n"
+                 "Put the files back, or give --skip-missing to leave those clips out." % (len(gone), names))
+            return 4
+        _say("Left out, files missing: %s" % names)
     missing = engine.missing_encoders(fmt)
     if missing:
         _say("Can't make %s files: missing %s" % (fmt, ", ".join(missing)))
@@ -56,7 +82,17 @@ def render(args):
         if pct != last[0]:
             last[0] = pct
             _say("%d%%" % pct)
-    ex = engine.Exporter(project, out, fmt, preset or "1080p", on_progress=progress)
+    engine.prepare(project)
+    try:
+        ex = engine.Exporter(project, out, fmt, preset or "1080p", on_progress=progress)
+    except model.EditError as e:
+        _say("Can't make %s: %s" % (out, e))
+        return 1
+    except GLib.Error as e:
+        _say("Can't make %s: %s" % (out, e.message))
+        return 1
+    if ex.bad:
+        _say("Left out, can't be read on this computer: %s" % ", ".join(ex.bad[:5]))
     ok = ex.run_sync(24 * 3600)
     if not ok:
         _say("Export failed: %s" % (ex.error or "unknown error"))

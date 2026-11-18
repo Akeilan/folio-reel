@@ -31,6 +31,13 @@ def init():
         Gst.init(None)
         GES.init()
         _ready = True
+        # GStreamer before 1.22: vp9parse announces 4:4:4 before it has read a frame, the encoder's
+        # filter is fixed to that, and an ordinary 4:2:0 film is then refused ("Internal data
+        # stream error"). Nothing needs that parser: VP9 decodes and muxes without it (R9-08).
+        if (Gst.version().major, Gst.version().minor) < (1, 22):
+            f = Gst.Registry.get().find_feature("vp9parse", Gst.ElementFactory)
+            if f is not None:
+                f.set_rank(Gst.Rank.NONE)
 
 
 def ns(secs):
@@ -50,10 +57,22 @@ def probe(path):
         try:
             pb_info = GdkPixbuf.Pixbuf.get_file_info(model.uri_to_path(uri))
             w, h = pb_info[1], pb_info[2]
+            if pb_info[0] is None:
+                w, h = 0, 0
         except Exception:      # noqa: BLE001
             w, h = 0, 0
+        if w <= 0 or h <= 0:
+            # a kind of picture this desktop's image loaders don't know (WebP on 22.04): ask
+            # GStreamer, which is what will draw it (R9-36)
+            w, h = 0, 0
+            try:
+                vs = GstPbutils.Discoverer.new(15 * SECOND).discover_uri(uri).get_video_streams()
+                if vs:
+                    w, h = vs[0].get_width(), vs[0].get_height()
+            except GLib.Error:
+                pass
         return {"uri": uri, "name": name, "duration": model.IMAGE_SECONDS, "has_video": False, "has_audio": False,
-                "is_image": True, "width": w, "height": h}
+                "is_image": True, "width": w, "height": h, "par": 1.0, "turn": 0}
     disc = GstPbutils.Discoverer.new(15 * SECOND)
     try:
         info = disc.discover_uri(uri)
@@ -72,9 +91,225 @@ def probe(path):
         num, den = vids[0].get_framerate_num(), vids[0].get_framerate_denom()
         if num and den:
             fps = float(num) / float(den)
-    return {"uri": uri, "name": name, "duration": dur, "has_video": bool(vids) and not is_image,
-            "has_audio": bool(auds), "is_image": is_image, "width": w, "height": h,
-            "fps": round(fps, 3) or None}
+    par, turn = 1.0, 0
+    if vids:
+        pn, pd = vids[0].get_par_num(), vids[0].get_par_denom()
+        if pn and pd:
+            par = round(float(pn) / float(pd), 6)
+        tags = info.get_tags()
+        ok, how = tags.get_string("image-orientation") if tags is not None else (False, "")
+        if ok and how in ("rotate-90", "rotate-270"):
+            turn = 90 if how == "rotate-90" else 270
+    acodec = ""
+    if auds:
+        caps = auds[0].get_caps()
+        acodec = caps.to_string().split(",")[0] if caps is not None else ""
+        if acodec == "audio/mpeg":
+            st = caps.get_structure(0)
+            okv, ver = st.get_int("mpegversion")
+            acodec = "aac" if okv and ver in (2, 4) else "mp3"
+    out = {"uri": uri, "name": name, "duration": dur, "has_video": bool(vids) and not is_image,
+           "has_audio": bool(auds), "is_image": is_image, "width": w, "height": h,
+           "fps": round(fps, 3) or None, "par": par, "turn": turn, "acodec": acodec}
+    off = late_start(model.uri_to_path(uri))
+    if off:
+        out["offset"] = off
+    return out
+
+
+LATE_EXT = (".mpg", ".mpeg", ".vob", ".m2p", ".mod", ".tod", ".dat")
+
+
+def late_start(path):
+    """An MPEG program stream keeps its recorder's clock: its first picture is stamped some way
+    past zero, and played from zero the film starts on a frozen frame and loses that much off its
+    end (R9-18). How far past zero, in seconds, or 0."""
+    if not path or not path.lower().endswith(LATE_EXT):
+        return 0.0
+    exe = ffmpeg_path()
+    probe_exe = os.path.join(os.path.dirname(exe), "ffprobe") if exe else None
+    if not probe_exe or not os.path.exists(probe_exe):
+        return 0.0
+    import subprocess
+    try:
+        r = subprocess.run([probe_exe, "-v", "error", "-show_entries", "format=start_time", "-of",
+                            "default=nw=1:nk=1", path], capture_output=True, text=True, timeout=20)
+        v = float(r.stdout.strip().splitlines()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return 0.0
+    return round(v, 3) if 0.02 < v < 3600 else 0.0
+
+
+def shape(media):
+    """What a re-read of old media adds (R9-17): {"par", "turn", "acodec", "offset"} for media
+    that was put in the bin before Reel kept them. Empty when it can't be read."""
+    path = model.uri_to_path(media.get("uri") or "")
+    if not path or not os.path.exists(path) or media.get("is_image"):
+        return {"par": 1.0, "turn": 0}
+    try:
+        got = probe(path)
+    except Exception:       # noqa: BLE001
+        return {}
+    return {k: got[k] for k in ("par", "turn", "acodec", "offset") if k in got}
+
+
+# ------------------------------------------------- pictures GStreamer can't hold still (R9-03, R9-19, R9-34)
+STILL_EXT = (".bmp", ".tif", ".tiff", ".gif", ".jpg", ".jpeg")
+STILL_MAX = 3840
+
+
+def still_dir():
+    d = os.path.join(GLib.get_user_cache_dir(), "folio-reel", "stills")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def still_copy(uri):
+    """(path, width, height) of a PNG copy of a picture, or None when the picture is used as it
+    is. BMP and TIFF never produce a frame through GES, and an animated GIF plays to its end and
+    stops the film: each becomes a PNG of its first frame, made once and kept in the cache. A JPEG
+    goes the same way, turned the way its camera says, so the bars beside it are black rather
+    than the dark grey a full-range picture leaves."""
+    import hashlib
+    path = model.uri_to_path(uri) or ""
+    if not path.lower().endswith(STILL_EXT):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = hashlib.sha1(("%s|%d|%d" % (uri, st.st_size, int(st.st_mtime))).encode()).hexdigest()[:16]
+    out = os.path.join(still_dir(), "%s.png" % key)
+    hit = _stills.get(out)
+    if hit is not None and os.path.exists(out):
+        return hit
+    try:
+        if not os.path.exists(out) or os.path.getsize(out) == 0:
+            pb = GdkPixbuf.Pixbuf.new_from_file(path)
+            pb = pb.apply_embedded_orientation() or pb
+            w, h = pb.get_width(), pb.get_height()
+            if max(w, h) > STILL_MAX:
+                k = STILL_MAX / float(max(w, h))
+                pb = pb.scale_simple(max(2, int(w * k)), max(2, int(h * k)), GdkPixbuf.InterpType.BILINEAR)
+            pb.savev(out + ".part", "png", ["compression"], ["1"])
+            os.replace(out + ".part", out)
+        info = GdkPixbuf.Pixbuf.get_file_info(out)
+        got = (out, info[1], info[2])
+    except GLib.Error:
+        return None
+    _stills[out] = got
+    return got
+
+
+_stills = {}
+
+
+# ------------------------------------------------- sound that cuts clean (R9-11)
+def sound_dir():
+    d = os.path.join(GLib.get_user_cache_dir(), "folio-reel", "sound")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def wants_sound_copy(media):
+    """True for media whose sound is AAC, which is nearly every phone and camera film. Cut in the
+    middle, AAC comes back from the decoder with its first few milliseconds missing, so every cut
+    left 5 to 30 ms of silence. A lossless copy of the sound cuts to the sample."""
+    if not media or media.get("is_image") or not media.get("has_audio"):
+        return False
+    kind = media.get("acodec")
+    if kind is None:
+        return bool(media.get("has_video"))         # read by an older Reel: most films are AAC
+    return kind == "aac"
+
+
+def sound_copy_path(uri):
+    import hashlib
+    path = model.uri_to_path(uri) or uri
+    try:
+        st = os.stat(path)
+        stamp = "%d-%d" % (st.st_size, int(st.st_mtime))
+    except OSError:
+        stamp = "0-0"
+    key = hashlib.sha1(("%s|%s" % (uri, stamp)).encode()).hexdigest()[:16]
+    return os.path.join(sound_dir(), "%s.flac" % key)
+
+
+def sound_copy(uri):
+    """The lossless copy of this media's sound, if it has been made, else None."""
+    p = sound_copy_path(uri)
+    return p if os.path.exists(p) and os.path.getsize(p) > 0 else None
+
+
+def make_sound_copy(info, on_progress=None, stop=None, timeout=3600):
+    """Write the lossless copy of a film's sound. It starts at the film's own zero (sound that
+    begins late in its file is padded, not pulled forward) and runs the film's whole length."""
+    if not wants_sound_copy(info):
+        return None
+    out = sound_copy_path(info["uri"])
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    exe = ffmpeg_path()
+    src = model.uri_to_path(info["uri"])
+    if exe is None or not src or not os.path.exists(src):
+        return None
+    dur = float(info.get("duration") or 0) + float(info.get("offset") or 0)
+    part = out + ".part"
+    args = [exe, "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-i", src, "-vn", "-map", "0:a:0",
+            "-af", "aresample=async=1:first_pts=0,apad=whole_dur=%.3f" % max(0.1, dur),
+            "-c:a", "flac", "-compression_level", "2", "-f", "flac", part]
+    ok = _ffmpeg_run(args, dur, on_progress, stop, timeout)
+    if ok and os.path.exists(part) and os.path.getsize(part) > 0:
+        os.replace(part, out)
+        _assets.pop(GLib.filename_to_uri(out, None), None)
+        return out
+    if os.path.exists(part):
+        os.remove(part)
+    return None
+
+
+def to_prepare(project):
+    """What has to be made before this project can be rendered exactly: [("sound", media) or
+    ("fix", media, settings)]. Lossless sound for clips on the sound tracks, and the corrected or
+    retimed copies clips are waiting on (R9-09, R9-11)."""
+    out, seen = [], set()
+    have = have_ffmpeg()
+    for name in model.TRACKS:
+        for c in project.track(name):
+            if c["kind"] != "media":
+                continue
+            m = project.media_by_uri(c["media"])
+            path = model.uri_to_path(c["media"]) or ""
+            if m is None or m.get("is_image") or not os.path.exists(path) or not have:
+                continue
+            st = fix_settings(c)
+            if st is not None:
+                if fixed_copy(c["media"], c) is None and ("fix", c["media"], st) not in seen:
+                    seen.add(("fix", c["media"], st))
+                    out.append(("fix", m, st))
+            elif (name in ("audio", "music") or not c.get("sound_elsewhere")) and wants_sound_copy(m) \
+                    and sound_copy(c["media"]) is None and ("sound", c["media"]) not in seen:
+                seen.add(("sound", c["media"]))
+                out.append(("sound", m))
+    return out
+
+
+def prepare(project, on_progress=None, stop=None):
+    """Make everything to_prepare lists. on_progress(done so far, of how many, fraction of this
+    one, name). Returns how many were made."""
+    todo = to_prepare(project)
+    made = 0
+    for i, job in enumerate(todo):
+        def prog(f, i=i, job=job):
+            if on_progress is not None:
+                on_progress(i, len(todo), f, job[1]["name"])
+        prog(0.0)
+        if stop and stop():
+            break
+        got = make_sound_copy(job[1], prog, stop) if job[0] == "sound" else make_fix(job[1], job[2], prog, stop)
+        if got:
+            made += 1
+    return made
 
 
 def thumbnail(info, t=None, width=160):
@@ -87,10 +322,12 @@ def thumbnail(info, t=None, width=160):
         try:
             return GdkPixbuf.Pixbuf.new_from_file_at_scale(path, width, height, True)
         except GLib.Error:
-            return None
-    if not info.get("has_video"):
+            if not w0 or w0 <= 0:
+                return None
+            # no loader for it here (WebP on 22.04): let GStreamer draw the small picture
+    if not info.get("has_video") and not info.get("is_image"):
         return None
-    t = info["duration"] * 0.1 if t is None else t
+    t = (0.0 if info.get("is_image") else info["duration"] * 0.1) if t is None else t
     pipe = Gst.parse_launch(
         "uridecodebin uri=%s ! videoconvert ! videoscale ! video/x-raw,format=RGB,width=%d,height=%d,pixel-aspect-ratio=1/1 "
         "! appsink name=sink" % (info["uri"], width, height))
@@ -113,6 +350,31 @@ def thumbnail(info, t=None, width=160):
     finally:
         pipe.set_state(Gst.State.NULL)
     return pb
+
+
+_thumb_jobs = None
+
+
+def thumbnail_async(info, t, width, done):
+    """thumbnail() on a worker thread; done(pixbuf or None) runs on the main loop. One worker, in
+    the order asked: a long film cut into hundreds of clips no longer holds the window while their
+    pictures are made (R9-37)."""
+    global _thumb_jobs
+    import queue
+    import threading
+    if _thumb_jobs is None:
+        _thumb_jobs = queue.Queue()
+
+        def work():
+            while True:
+                i, tt, w, cb = _thumb_jobs.get()
+                try:
+                    pb = thumbnail(i, tt, w)
+                except Exception:           # noqa: BLE001
+                    pb = None
+                GLib.idle_add(lambda cb=cb, pb=pb: (cb(pb), False)[1])
+        threading.Thread(target=work, daemon=True).start()
+    _thumb_jobs.put((dict(info), t, width, done))
 
 
 # ------------------------------------------------- looking at the film that came out (R5-02)
@@ -704,16 +966,51 @@ def alpha_points(c, dip_in=0.0, dip_out=0.0):
     return pts
 
 
-def _place(project, c, vs, width, height):
+def crop_of(c):
+    """The clip's crop as fractions (left, right, top, bottom), never more than leaves a picture."""
+    cr = c.get("crop") or {}
+    try:
+        v = [max(0.0, min(0.9, float(cr.get(k, 0) or 0))) for k in "lrtb"]
+    except (TypeError, ValueError):
+        return (0.0, 0.0, 0.0, 0.0)
+    if v[0] + v[1] > 0.9:
+        v[1] = max(0.0, 0.9 - v[0])
+    if v[2] + v[3] > 0.9:
+        v[3] = max(0.0, 0.9 - v[2])
+    return tuple(v)
+
+
+def fitted(media, c, width, height):
+    """(w, h) of the clip's picture fitted whole into the frame, keeping its own shape: what is
+    left after the crop, at the width its pixels are meant to be shown (R9-17, R9-20). None when
+    the media's size isn't known."""
+    mw, mh = float((media or {}).get("width") or 0), float((media or {}).get("height") or 0)
+    if mw <= 0 or mh <= 0:
+        return None
+    l, r, t, b = crop_of(c)
+    dw = mw * (1.0 - l - r) * float(media.get("par") or 1.0)
+    dh = mh * (1.0 - t - b)
+    if media.get("turn") in (90, 270):
+        dw, dh = dh, dw
+    k = min(width / dw, height / dh)
+    return (dw * k, dh * k)
+
+
+def _place(project, c, vs, width, height, media=None):
     """Zoom, crop and pan-and-zoom (R3-03) through the picture's position and size."""
     z = max(1.0, float(c.get("zoom", 1.0)))
     pz = c.get("panzoom")
-    if z == 1.0 and not pz:
+    fit = fitted(media, c, width, height) if c["kind"] == "media" else None
+    shaped = fit is not None and (any(crop_of(c)) or abs(float(media.get("par") or 1.0) - 1.0) > 1e-3)
+    if z == 1.0 and not pz and not shaped:
         return
+    # the box the picture is drawn in is the picture's own shape: handed the frame's shape, a photo
+    # that isn't 16:9 was stretched to it the moment it was zoomed or cropped
+    bw, bh = fit if fit is not None else (float(width), float(height))
 
     def rect(zoom, fx=0.5, fy=0.5):
-        w, h = int(width * zoom), int(height * zoom)
-        return (int(-(w - width) * fx), int(-(h - height) * fy), w, h)
+        w, h = int(round(bw * zoom)), int(round(bh * zoom))
+        return (int(round((width - w) * fx)), int(round((height - h) * fy)), w, h)
     inp = ns(c["inpoint"]) if c["kind"] == "media" else 0
     if pz:
         a, b = {"in": (rect(z), rect(z * 1.3)), "out": (rect(z * 1.3), rect(z)),
@@ -769,6 +1066,22 @@ def speed_filter(sp):
     return "pitch tempo=%f" % sp
 
 
+def title_markup(c):
+    """A title's words as the markup GES draws. The words are escaped: an ampersand or an angle
+    bracket in them used to make the whole title vanish (R9-06). A see-through background colour
+    becomes a box behind the words, which lower thirds and captions never had (R9-21)."""
+    text = c.get("text", "") or ""
+    bgs = (c.get("bg_color") or "#ff000000").lstrip("#")
+    alpha = int(bgs[:2], 16) if len(bgs) == 8 else 255
+    rgb = bgs[2:] if len(bgs) == 8 else bgs
+    lines = text.split("\n")
+    if 0 < alpha < 255 and text.strip():
+        pct = max(1, min(100, int(round(alpha * 100.0 / 255.0))))
+        return "\n".join('<span background="#%s" bgalpha="%d%%"> %s </span>' % (rgb, pct, GLib.markup_escape_text(ln))
+                         if ln.strip() else "" for ln in lines)
+    return GLib.markup_escape_text(text)
+
+
 def _effects(project, c, clip, media):
     key = chroma_effect(c)
     if key:
@@ -777,11 +1090,11 @@ def _effects(project, c, clip, media):
     if any(abs(col.get(k, d) - d) > 1e-6 for k, d in (("brightness", 0.0), ("contrast", 1.0), ("saturation", 1.0), ("hue", 0.0))):
         clip.add(GES.Effect.new("videobalance brightness=%f contrast=%f saturation=%f hue=%f" % (
             col.get("brightness", 0.0), col.get("contrast", 1.0), col.get("saturation", 1.0), col.get("hue", 0.0))))
-    cr = c.get("crop") or {}
-    if media and any(cr.get(k, 0) > 0 for k in "lrtb") and media.get("width"):
+    l, r, t, b = crop_of(c)
+    if media and (l or r or t or b) and (media.get("width") or 0) > 0:
         mw, mh = media["width"], media["height"]
         clip.add(GES.Effect.new("videocrop left=%d right=%d top=%d bottom=%d" % (
-            int(cr.get("l", 0) * mw), int(cr.get("r", 0) * mw), int(cr.get("t", 0) * mh), int(cr.get("b", 0) * mh))))
+            int(l * mw), int(r * mw), int(t * mh), int(b * mh))))
 
 
 def build(project, tl, width=None, height=None, proxies=False):
@@ -802,6 +1115,7 @@ def build(project, tl, width=None, height=None, proxies=False):
         for layer in layers[name]:
             layer.set_auto_transition(name in ("video", "titles"))
     made = {}
+    build.bad = []          # names of clips left out because their file couldn't be read (R9-03)
     for name in model.TRACKS:
         clips = project.track(name)
         extra, slot, prev = {}, {}, None
@@ -821,11 +1135,23 @@ def build(project, tl, width=None, height=None, proxies=False):
                     else:
                         pe["alpha_out"] = d        # the clip before is on top: it fades out
                     e["gain_in"], pe["gain_out"] = d, d
+            if prev is not None and name in ("audio", "music"):
+                # sounds that overlap cross over: under a picture's crossfade or wipe the two
+                # sounds used to play on top of each other at full level (R9-12)
+                over = model.end_of(prev) - c["start"]
+                if over > 0.02:
+                    over = min(over, c["duration"], prev["duration"])
+                    e["gain_in"] = max(e["gain_in"], over)
+                    extra[prev["id"]]["gain_out"] = max(extra[prev["id"]]["gain_out"], over)
             slot[c["id"]] = s
             prev = c
         for c in clips:
             layer = layers[name][slot[c["id"]]]
-            g = _add(project, layer, name, c, width, height, extra[c["id"]], proxies)
+            try:
+                g = _add(project, layer, name, c, width, height, extra[c["id"]], proxies)
+            except GLib.Error:
+                g = None
+                build.bad.append(c.get("name") or "a clip")
             if g is not None:
                 made[c["id"]] = g
         # wipes and the like: the transition GES made where two clips overlap
@@ -854,6 +1180,16 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
         uri = c["media"]
         want = fix_settings(c)
         fixed = fixed_copy(uri, c)
+        late = float(media.get("offset") or 0.0)        # an MPEG file's clock starts past zero (R9-18)
+        if media.get("is_image"):
+            still = still_copy(uri)
+            if still is not None:
+                uri = GLib.filename_to_uri(still[0], None)
+                media = dict(media, width=still[1], height=still[2], turn=0)
+        elif fixed is None and track in ("audio", "music") and wants_sound_copy(media):
+            sc = sound_copy(uri)
+            if sc is not None:
+                uri = GLib.filename_to_uri(sc, None)     # the lossless copy: cuts to the sample (R9-11)
         # a copy that was rendered at the clip’s speed already runs at it, so nothing stretches it
         # again at playing time (R5-07)
         retimed = fixed is not None and want is not None and abs(want[3] - 1.0) > 1e-9
@@ -876,15 +1212,28 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
             types = GES.TrackType.UNKNOWN
         sp = float(c.get("speed", 1.0))
         inpoint, mdur = c["inpoint"], float(media["duration"])
+        if fixed is None:
+            inpoint, mdur = inpoint + late, mdur + late
         if retimed:
             sp = want[3]
             inpoint, mdur, sp = c["inpoint"] / sp, mdur / sp, 1.0
         span = c["duration"] * sp
         if not media.get("is_image"):
             span = min(span, max(0.04, mdur - inpoint))
+        # A film whose sound stays with its picture still gets its sound from the lossless copy,
+        # as a sound-only clip beside the picture, so its cuts are clean too (R9-11).
+        apart = None
+        if (fixed is None and track in ("video", "titles") and types == GES.TrackType.UNKNOWN
+                and media.get("has_video") and wants_sound_copy(media) and abs(sp - 1.0) < 1e-6):
+            sc = sound_copy(c["media"])
+            if sc is not None:
+                apart, types = GLib.filename_to_uri(sc, None), GES.TrackType.VIDEO
         clip = layer.add_asset(a, ns(c["start"]), 0 if media.get("is_image") else ns(inpoint), ns(span), types)
         if clip is None:
             return None
+        sound_of = clip
+        if apart is not None:
+            sound_of = layer.add_asset(asset(apart), ns(c["start"]), ns(inpoint), ns(span), GES.TrackType.AUDIO) or clip
         if abs(sp - 1.0) > 1e-6:
             if media.get("has_video") and track in ("video", "titles"):
                 clip.add(GES.Effect.new("videorate rate=%f" % sp))
@@ -898,8 +1247,8 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
             ap = alpha_points(c, ex["alpha_in"], ex["alpha_out"])
             if ap:
                 _control(vs, "alpha", [(inp + ns(t * sp), v) for t, v in ap], absolute=False)
-            _place(project, c, vs, width, height)
-        for au in _children(clip, GES.AudioSource):
+            _place(project, c, vs, width, height, media)
+        for au in _children(sound_of, GES.AudioSource):
             if c.get("muted"):
                 au.set_child_property("mute", True)
             pts = gain_points(project, c, ex["gain_in"], ex["gain_out"])
@@ -911,7 +1260,7 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
     clip.set_start(ns(c["start"]))
     clip.set_duration(ns(c["duration"]))
     layer.add_clip(clip)
-    clip.set_child_property("text", c.get("text", ""))
+    clip.set_child_property("text", title_markup(c))
     clip.set_child_property("font-desc", c.get("font", "Sans Bold 48"))
     clip.set_child_property("color", argb(c.get("text_color", "#ffffffff")))
     bgs = c.get("bg_color", "#ff000000").lstrip("#")
@@ -921,11 +1270,9 @@ def _add(project, layer, track, c, width, height, ex, proxies=False):
         clip.set_child_property("foreground-color", argb("#" + bgs))
     else:
         # lower thirds and captions: the picture shows through; a shaded box sits behind the words
+        # lower thirds and captions: the picture shows through; title_markup puts a box of the
+        # background colour behind the words
         clip.set_child_property("foreground-color", argb("#00000000"))
-        try:
-            clip.set_child_property("shaded-background", bg_alpha > 0)
-        except Exception:       # noqa: BLE001
-            pass
     try:
         clip.set_child_property("pattern", 17)       # videotestsrc solid-color: the background
     except Exception:       # noqa: BLE001
@@ -963,7 +1310,7 @@ def db_to_bar(db):
 class Preview:
     """A pipeline that plays the project; widget is the picture (or None without gtksink)."""
 
-    def __init__(self, project, on_event=None):
+    def __init__(self, project, on_event=None, on_widget=None):
         init()
         self.project = project
         self.on_event = on_event or (lambda ev, val=None: None)
@@ -980,6 +1327,11 @@ class Preview:
             self.pipeline.preview_set_video_sink(self.sink)
             if self.sink.find_property("widget"):
                 self.widget = self.sink.get_property("widget")
+        # The picture widget goes into the window before the pipeline starts. Started first, with a
+        # film already on the timeline, the sink found its widget homeless and opened a window of
+        # its own for it: the preview in the editor then stayed black (R9-30).
+        if on_widget is not None:
+            on_widget(self.widget)
         # the sound goes through a level meter, so the window can show how loud it is (R4-01)
         a = os.environ.get("FOLIO_REEL_AUDIOSINK") or "autoaudiosink"
         self.level = None
@@ -1010,6 +1362,7 @@ class Preview:
         self._pending_seek = None
         self.quality = 1
         self.proxies = False
+        self.bad = []
         self._size = (project.width, project.height, 1)
         self.refresh()
         self.pipeline.set_state(Gst.State.PAUSED)
@@ -1086,6 +1439,7 @@ class Preview:
         self.pipeline.set_state(Gst.State.READY)
         self.pipeline.get_state(5 * SECOND)
         build(self.project, self.timeline, proxies=self.proxies)
+        self.bad = list(build.bad)
         self.timeline.commit()
         self.pipeline.set_state(Gst.State.PAUSED)
         # not a blocking wait: GTK's video sink shows frames through the main loop
@@ -1225,7 +1579,14 @@ def _pick(*names):
 
 def encoding_profile(fmt, width, height, fps):
     init()
-    raw_v = Gst.Caps.from_string("video/x-raw,width=%d,height=%d,framerate=%d/1" % (width, height, int(fps)))
+    # The encoder is handed plain 4:2:0, which is what it wants anyway. Left unsaid, the mixer's
+    # four bytes a pixel were queued up in front of it, and a title or a photo at 4K took over
+    # 5 GB to render (R9-10). Asked of the mixer itself instead, GStreamer 1.24 refuses to mix a
+    # caption over a film, so it is asked here.
+    # One colour description for the whole film as well: a film whose clips are described
+    # differently changed the encoder's input part-way, and 1.24 stops a render there.
+    raw_v = Gst.Caps.from_string("video/x-raw,format=I420,colorimetry=(string)bt709,chroma-site=(string)mpeg2,"
+                                 "width=%d,height=%d,framerate=%d/1" % (width, height, int(fps)))
     raw_a = Gst.Caps.from_string("audio/x-raw,channels=2,rate=48000")
     if fmt == "webm":
         cont = GstPbutils.EncodingContainerProfile.new("webm", None, Gst.Caps.from_string("video/webm"), None)
@@ -1237,13 +1598,6 @@ def encoding_profile(fmt, width, height, fps):
         acaps = "audio/mpeg,mpegversion=4"
     vp = GstPbutils.EncodingVideoProfile.new(Gst.Caps.from_string(vcaps), None, raw_v, 0)
     ap = GstPbutils.EncodingAudioProfile.new(Gst.Caps.from_string(acaps), None, raw_a, 0)
-    try:
-        # quicker encoders: rendering a long film shouldn't take all afternoon
-        if vcaps == "video/x-vp9":
-            vp.set_element_properties(Gst.Structure.from_string(
-                "element-properties-map, map={[vp9enc, deadline=(int64)1, cpu-used=(int)8]}")[0])
-    except Exception:       # noqa: BLE001 — older GStreamer: default settings
-        pass
     cont.add_profile(vp)
     cont.add_profile(ap)
     return cont
@@ -1259,35 +1613,63 @@ def missing_encoders(fmt):
     return out
 
 
+def export_size(project, preset):
+    """The size a film is rendered at: the preset sets the short side, the project its shape. A
+    4:3 project used to come out 16:9 (R9-16)."""
+    short = {"720p": 720, "1080p": 1080, "4k": 2160}.get(preset)
+    pw, ph = int(project.width), int(project.height)
+    if not short or pw <= 0 or ph <= 0:
+        return (pw // 2 * 2, ph // 2 * 2)
+    if pw >= ph:
+        return (int(round(short * pw / float(ph) / 2.0)) * 2, short)
+    return (short, int(round(short * ph / float(pw) / 2.0)) * 2)
+
+
+def used_by(project, path):
+    """The media entry whose file is `path`, if the project uses that very file (R9-01)."""
+    try:
+        want = os.path.realpath(path)
+    except OSError:
+        return None
+    for m in project.media:
+        p = model.uri_to_path(m["uri"])
+        if p and os.path.realpath(p) == want:
+            return m
+    return None
+
+
 class Exporter:
-    """Renders a copy of the project to a file. on_progress(fraction), on_done(path or None, error)."""
+    """Renders a copy of the project to a file. on_progress(fraction), on_done(path or None, error).
+
+    The film is written beside its target under another name and moved into place when it is
+    whole: before this the target was deleted first, so an export onto a file the project used
+    destroyed the footage, and a cancelled or failed export left nothing where a good film had
+    been (R9-01, R9-23)."""
 
     def __init__(self, project, path, fmt="mp4", preset="1080p", on_progress=None, on_done=None):
         init()
         self.path = path
         self.on_progress = on_progress or (lambda f: None)
         self.on_done = on_done or (lambda p, e: None)
-        if preset in model.PRESETS:
-            w, h = model.PRESETS[preset]
-        else:
-            w, h = project.width, project.height
-        # the project's own shape (portrait, square) is kept at the preset's size
-        if project.height > project.width:
-            w, h = h, w
-        elif project.height == project.width:
-            w = h
+        m = used_by(project, path)
+        if m is not None:
+            raise model.EditError("“%s” is a file this project uses. Give the film another name, or it "
+                                  "would replace its own footage." % m["name"])
+        w, h = export_size(project, preset)
         self.size = (w, h)
         snap = model.Project(copy.deepcopy(project.data))
         self.timeline = make_timeline(w, h, project.fps)
         build(snap, self.timeline, w, h)
+        self.bad = list(build.bad)
         self.timeline.commit_sync()
         self.duration = self.timeline.get_duration()
         self.pipeline = GES.Pipeline()
         self.pipeline.set_timeline(self.timeline)
         prof = encoding_profile(fmt, w, h, project.fps)
-        if os.path.exists(path):
-            os.remove(path)
-        if not self.pipeline.set_render_settings(model.path_to_uri(path), prof):
+        self.tmp = os.path.join(os.path.dirname(os.path.abspath(path)), ".%s.part" % os.path.basename(path))
+        if os.path.exists(self.tmp):
+            os.remove(self.tmp)
+        if not self.pipeline.set_render_settings(model.path_to_uri(self.tmp), prof):
             raise model.EditError("This computer can't make %s files." % FORMATS.get(fmt, fmt))
         self.pipeline.set_mode(GES.PipelineFlags.RENDER)
         self.pipeline.connect("deep-element-added", self._element_added)
@@ -1303,8 +1685,15 @@ class Exporter:
     def _element_added(_bin, _sub, el):
         # a quicker H.264 preset: rendering a long film shouldn't take all afternoon
         f = el.get_factory()
-        if f is not None and f.get_name() == "x264enc":
+        name = f.get_name() if f is not None else ""
+        if name == "x264enc":
             Gst.util_set_object_arg(el, "speed-preset", "faster")
+        elif name in ("vp9enc", "vp8enc"):
+            # set here rather than through the profile: GStreamer 1.20 can't read those settings
+            # from a profile, and VP9 at its defaults takes all afternoon (R9-08)
+            for prop, val in (("deadline", "1"), ("cpu-used", "8" if name == "vp9enc" else "4"), ("row-mt", "true")):
+                if el.find_property(prop) is not None:
+                    Gst.util_set_object_arg(el, prop, val)
 
     def start(self):
         if self.duration <= 0:
@@ -1330,9 +1719,16 @@ class Exporter:
         bus = self.pipeline.get_bus()
         bus.disconnect(self._bus_id)
         bus.remove_signal_watch()
-        if error and os.path.exists(self.path):
+        if not error:
             try:
-                os.remove(self.path)
+                if not os.path.exists(self.tmp) or os.path.getsize(self.tmp) == 0:
+                    raise OSError("nothing was written")
+                os.replace(self.tmp, self.path)
+            except OSError as e:
+                error = self.error = "The film couldn't be written: %s" % e
+        if error and os.path.exists(self.tmp):
+            try:
+                os.remove(self.tmp)
             except OSError:
                 pass
         self.fraction = 1.0 if not error else 0.0

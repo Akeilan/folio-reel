@@ -147,8 +147,10 @@ class Backstage(Gtk.Box):
             self.fmt.append(k, name)
         self.fmt.set_active_id(self.win.app.settings.get("export_format", "mp4"))
         self.preset = Gtk.ComboBoxText()
+        from .engine import export_size
         for k in PRESETS:
-            self.preset.append(k, PRESET_NAMES[k])
+            # the size this project comes out at, whatever its shape (R9-16)
+            self.preset.append(k, "%s (%d × %d)" % ((PRESET_NAMES[k].split(" (")[0],) + export_size(self.win.project, k)))
         self.preset.set_active_id(self.win.app.settings.get("export_preset", "1080p"))
         grid.attach(Gtk.Label(label="Format", xalign=0), 0, 0, 1, 1)
         grid.attach(self.fmt, 1, 0, 1, 1)

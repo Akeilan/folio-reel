@@ -106,6 +106,44 @@ class ReelApp(Gtk.Application):
             self.windows[-1].present()
             return
         self._maybe_script(self.new_window())
+        GLib.idle_add(self.offer_recovery)
+
+    def offer_recovery(self):
+        """Projects with unsaved changes left behind by a Reel that didn't close properly: ask
+        about each, and open the ones wanted with their changes in place."""
+        from . import model, recovery
+        if getattr(self, "_recovery_asked", False):
+            return False
+        self._recovery_asked = True
+        for entry in recovery.pending()[:5]:
+            parent = self.windows[-1] if self.windows else None
+            d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                  buttons=Gtk.ButtonsType.NONE,
+                                  text="Folio Reel didn't close properly last time.")
+            d.format_secondary_text("Bring back “%s” with the changes that weren't saved (kept at %s)?"
+                                    % (entry["name"], entry["when"]))
+            d.set_title(APP_NAME)
+            d.add_button("Discard", Gtk.ResponseType.NO)
+            d.add_button("Recover", Gtk.ResponseType.YES)
+            d.set_default_response(Gtk.ResponseType.YES)
+            self.recovery_dialog = d
+            r = d.run()
+            d.destroy()
+            self.recovery_dialog = None
+            if r == Gtk.ResponseType.YES:
+                try:
+                    p = model.Project(model.check_project(entry["project"]), entry.get("path"))
+                except model.EditError:
+                    recovery.clear(entry["id"])
+                    continue
+                blank = [w for w in self.windows if w.is_blank()]
+                win = blank[0] if blank else self.new_window()
+                p.recovered = True          # unsaved work: closing asks, even with nothing to undo
+                win.adopt(p, entry.get("path"), changed=True)
+                win.notice("Recovered “%s”. Save it to keep it." % entry["name"], 20)
+            if r in (Gtk.ResponseType.YES, Gtk.ResponseType.NO):
+                recovery.clear(entry["id"])
+        return False
 
     def _maybe_script(self, win):
         script = os.environ.get("FOLIO_TEST_SCRIPT")
@@ -131,6 +169,10 @@ class ReelApp(Gtk.Application):
                 win = self.open_path(path)
         if win is not None:
             self._maybe_script(win)
+        elif not self.windows:
+            # the file couldn't be opened (the reason has been shown): a window to work in all the same
+            self._maybe_script(self.new_window())
+        GLib.idle_add(self.offer_recovery)
 
     def new_window(self, path=None):
         from .window import ReelWindow
@@ -148,7 +190,18 @@ class ReelApp(Gtk.Application):
         if from_window is not None and from_window.is_blank():
             from_window.open_file(path)
             return from_window
-        return self.new_window(path)
+        blank = [w for w in self.windows if w.is_blank()]
+        win = blank[0] if blank else self.new_window()
+        if win.open_file(path) is False and not blank and len(self.windows) > 1:
+            # nothing to show in the window made for it
+            win.project.dirty = False
+            self.windows.remove(win)
+            if win.preview is not None:
+                win.preview.close()
+                win.preview = None
+            win.destroy()
+            return None
+        return win
 
     def window_closed(self, win):
         if win in self.windows:
@@ -165,6 +218,10 @@ def main(argv=None):
     argv = list(argv if argv is not None else sys.argv)
     if "--version" in argv:
         print("%s %s" % (APP_NAME, VERSION))
+        return 0
+    if "--help" in argv or "-h" in argv:
+        from . import cli
+        print(cli.USAGE)
         return 0
     if "--render" in argv:
         # R3-08: render a project (or a Folio Show slide list) to a video without a window

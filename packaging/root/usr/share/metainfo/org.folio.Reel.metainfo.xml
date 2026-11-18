@@ -12,5 +12,5 @@
   </description>
   <launchable type="desktop-id">org.folio.Reel.desktop</launchable>
   <provides><binary>folio-reel</binary></provides>
-  <releases><release version="0.1.0" date="2026-10-30"/></releases>
+  <releases><release version="0.15.0" date="2026-11-18"/><release version="0.1.0" date="2026-10-30"/></releases>
 </component>

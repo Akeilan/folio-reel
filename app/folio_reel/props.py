@@ -48,6 +48,15 @@ class ClipSettings(Gtk.Box):
     def refresh(self, force=True):
         clips = self.win.timeline.selected_clips() if hasattr(self.win, "timeline") else []
         c = clips[0] if len(clips) == 1 else None
+        self.snd_id = None
+        if len(clips) == 2:
+            # a picture and its own sound, picked together as they are by default: these are the
+            # picture's settings, with its sound's volume among them. Before this the pane showed
+            # nothing for an ordinary clip unless it was Alt+clicked (R9-07).
+            for a, other in ((clips[0], clips[1]), (clips[1], clips[0])):
+                partner = self.win.project.sound_partner(a["id"]) if a.get("sound_elsewhere") else None
+                if partner is not None and partner["id"] == other["id"]:
+                    c, self.snd_id = a, other["id"]
         if not force and c is not None and c["id"] == self.cid:
             self._update_values(c)
             return
@@ -64,6 +73,7 @@ class ClipSettings(Gtk.Box):
             hint = Gtk.Label(label="Select a clip on the timeline to change it." if len(clips) != 1 else "")
             if len(clips) > 1:
                 hint.set_text("%d clips selected. Volume, speed, fades and colour on the ribbon change all of them." % len(clips))
+            self.snd_id = None
             hint.set_line_wrap(True)
             hint.set_max_width_chars(28)
             hint.get_style_context().add_class("reel-hint")
@@ -117,7 +127,21 @@ class ClipSettings(Gtk.Box):
         return cb
 
     def _set(self, label, **props):
+        snd = getattr(self, "snd_id", None)
+        if snd and set(props) <= {"fade_in", "fade_out"}:
+            # a fade on a picture shown with its sound fades both
+            def both(p):
+                with p.batch(label):
+                    p.set(self.cid, label=label, **props)
+                    return p.set(snd, label=label, **props)
+            self.win.edit(both, own=True)
+            return
         self.win.edit(lambda p: p.set(self.cid, label=label, merge=True, **props), own=True)
+
+    def _set_snd(self, label, **props):
+        snd = getattr(self, "snd_id", None)
+        if snd:
+            self.win.edit(lambda p: p.set(snd, label=label, merge=True, **props), own=True)
 
     def _build(self, box, c):
         p = self.win.project
@@ -203,6 +227,15 @@ class ClipSettings(Gtk.Box):
             lab.set_max_width_chars(34)
             lab.get_style_context().add_class("dim-label" if (snd and not off) else "reel-warning")
             box.pack_start(lab, False, False, 0)
+            if snd is not None and getattr(self, "snd_id", None) == snd["id"]:
+                self._row(box, "Volume", self._scale("snd_volume", 0, 200, 5, snd.get("volume", 1.0) * 100,
+                                                     lambda v: "%d%%" % v,
+                                                     lambda v: self._set_snd("Volume", volume=round(v) / 100.0)))
+                mute = Gtk.CheckButton(label="Mute")
+                mute.set_active(snd.get("muted", False))
+                mute.connect("toggled", lambda b: self._quiet or self._set_snd("Mute", muted=b.get_active()))
+                self.controls["snd_muted"] = mute
+                box.pack_start(mute, False, False, 0)
         if has_sound:
             self._section(box, "Sound")
             self._row(box, "Volume", self._scale("volume", 0, 200, 5, c.get("volume", 1.0) * 100,
@@ -347,6 +380,14 @@ class ClipSettings(Gtk.Box):
             w = self.controls.get("muted")
             if w is not None:
                 w.set_active(c.get("muted", False))
+            snd = self.win.project.clip(self.snd_id) if getattr(self, "snd_id", None) else None
+            if snd is not None:
+                w = self.controls.get("snd_volume")
+                if w is not None and abs(w.get_value() - snd.get("volume", 1.0) * 100) > 0.5:
+                    w.set_value(snd.get("volume", 1.0) * 100)
+                w = self.controls.get("snd_muted")
+                if w is not None:
+                    w.set_active(snd.get("muted", False))
             w = self.controls.get("music_bed")
             if w is not None:
                 w.set_active(c.get("music_bed", False))

@@ -73,25 +73,26 @@ try:
         check(spread <= 0.006, "sound and picture keep step along the whole of it", (off, spread))
         exact = spread
 
-    # ---------------------------------------------------------------- without the copy, it wanders
+    # ------------------------------------------------- without the copy, an export makes it again (R9-09)
     win.run("remove-fixes")
     pump(0.4)
     check(engine.fixed_copy(c["media"], win.project.clip(c["id"])) is None, "Remove Corrections throws the copy away")
     out2 = export("stretched.mp4")
     if os.path.exists(out2):
         off2, spread2, _f, _b = wander(out2)
-        check(spread2 > exact, "stretching the sound to fit instead lets it wander", (off2, spread2, exact))
+        check(spread2 <= 0.006, "an export renders the copy again rather than stretch the sound to fit (R9-09)",
+              (off2, spread2, exact))
 
-    # ---------------------------------------------------------------- long footage waits to be asked
+    # ------------------------------------------------- long footage renders in the background (R9-09)
     was, engine.RETIME_AUTO = engine.RETIME_AUTO, 0.5
     try:
         win.timeline.selected = [c["id"]]
         win.run("speed:2")
-        pump(0.4)
-        c2 = win.project.clip(c["id"])
-        check(engine.fixed_copy(c2["media"], c2) is None, "long footage is not rendered behind your back")
-        check("Render Correction" in win.notice_label.get_text(), "it says how to make it exact",
+        check("background" in win.notice_label.get_text(), "long footage: the window says its speed is being rendered",
               win.notice_label.get_text())
+        check(wait(lambda: engine.fixed_copy(win.project.clip(c["id"])["media"], win.project.clip(c["id"])) is not None, 90),
+              "and the copy arrives without the window having waited for it")
+        pump(0.4)
     finally:
         engine.RETIME_AUTO = was
     win.timeline.selected = [c["id"]]

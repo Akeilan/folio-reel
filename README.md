@@ -6,6 +6,23 @@ titles and music, and make a file. Part of Folio Studio.
 It is the newest app in the suite and the least finished. What is here works; Backlog 4 lists
 what a video editor still needs.
 
+## What's new in 0.15.0
+
+Backlog 9: a full test of 0.14.0 with ordinary phone-style footage found 37 things, and all are
+dealt with.
+
+- **Nothing is lost**: an export is written beside its target and moved into place when it is
+  whole, and never onto a file the project uses. Unsaved work is kept in a recovery copy.
+- **Projects open**: with a media file missing (the clips are marked, and Find File on the bin
+  puts them right), with a picture GStreamer can't hold still (BMP, TIFF, animated GIF), and a
+  file that isn't a project says so.
+- **Picture and sound stay together**: speed changes and Ripple Delete move later clips once;
+  cuts in AAC footage are clean; crossfades cross the sound over.
+- **Clip Settings** shows for a clip picked with its sound, and its keys are its own.
+- **Shape**: crop and zoom keep a picture's proportions, 4:3 projects export 4:3, non-square
+  pixels are drawn right.
+- **WebM** exports on 22.04, a 4K export holds half the memory, and ffmpeg is now required.
+
 ## What it does
 
 - **Media**: import video, pictures and sound; record the screen, a window, a webcam or the
@@ -55,6 +72,8 @@ what a video editor still needs.
 ```sh
 cd app && python3 -m folio_reel         # run it
 python3 tests/test_engine.py            # the engine
+python3 tests/test_backlog9.py          # Backlog 9, measured from rendered films
+sh tests/run_ui.sh ui_backlog9.py       # Backlog 9 in the window
 sh tests/run_ui.sh ui_basic.py          # the interface, on an X display
 sh tests/run_ui.sh ui_steady.py         # steadying and straightening (R4-07)
 sh tests/run_ui.sh ui_speed.py          # slow motion that keeps its sound in step (R5-07)
@@ -63,6 +82,6 @@ sh build-deb.sh out/                    # the package
 XD=95 tools/release.sh                  # everything, on the three test machines
 ```
 
-Needs python3-gi, GTK 3 and GStreamer (base, good, bad, libav). Steadying, straightening and
-exact speed also need ffmpeg; without it Reel says so, and a speed change falls back to stretching
-the sound to fit.
+Needs python3-gi, GTK 3, GStreamer (base, good, bad, libav) and ffmpeg. ffmpeg renders the copies
+Reel edits from: steadied, straightened and retimed footage, and a lossless copy of each film's
+sound so that cuts are clean.

@@ -56,19 +56,28 @@ class MediaBin(Gtk.Box):
         self.pack_start(ov, True, True, 0)
         self._thumbs = {}
 
+    def _plain_icon(self, m):
+        return icons.pixbuf("reel-music" if m.get("has_audio") and not m.get("has_video") else "insertgraphic", 32)
+
     def _icon_for(self, m):
-        if m["uri"] in self._thumbs:
-            return self._thumbs[m["uri"]]
-        pb = None
-        if m.get("has_video") or m.get("is_image"):
+        """The picture for a bin item: what has been made so far, a plain icon meanwhile. The
+        real one is made on a worker thread and put in when it is ready (R9-37)."""
+        uri = m["uri"]
+        if uri in self._thumbs:
+            return self._thumbs[uri]
+        pb = self._plain_icon(m)
+        self._thumbs[uri] = pb
+        if (m.get("has_video") or m.get("is_image")) and uri not in self.win.project.missing:
             from . import engine
-            try:
-                pb = engine.thumbnail(m, None, 88)
-            except Exception:       # noqa: BLE001
-                pb = None
-        if pb is None:
-            pb = icons.pixbuf("reel-music" if m.get("has_audio") else "insertgraphic", 32)
-        self._thumbs[m["uri"]] = pb
+
+            def made(got, uri=uri):
+                if got is None:
+                    return
+                self._thumbs[uri] = got
+                for row in self.store:
+                    if row[COL_URI] == uri:
+                        row[COL_PIX] = got
+            engine.thumbnail_async(m, None, 88, made)
         return pb
 
     def refresh(self):
@@ -80,7 +89,11 @@ class MediaBin(Gtk.Box):
                                 "" if m.get("is_image") else ", " + model.fmt_time(m.get("duration", 0)))
             if m.get("width"):
                 tip += ", %d × %d" % (m["width"], m["height"])
-            it = self.store.append([None, m["name"], m["uri"], GLib.markup_escape_text(tip)])
+            gone = m["uri"] in self.win.project.missing
+            if gone:
+                tip += "\nThe file is missing. Right-click and choose Find File."
+            it = self.store.append([None, m["name"] + (" (missing)" if gone else ""), m["uri"],
+                                    GLib.markup_escape_text(tip)])
             if m["uri"] in sel:
                 self.view.select_path(self.store.get_path(it))
         self.empty.set_visible(len(self.store) == 0)
@@ -129,6 +142,7 @@ class MediaBin(Gtk.Box):
             view.select_path(path)
         menu = Gtk.Menu()
         for label, cmd in (("Add to Timeline", "add-to-timeline"), ("Import Media…", "import-media"),
+                           ("Find File…", "find-media"),
                            (None, None), ("Remove from Project", "remove-media")):
             if label is None:
                 menu.append(Gtk.SeparatorMenuItem())

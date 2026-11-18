@@ -165,16 +165,13 @@ class Timeline(Gtk.Box):
         if m is None or not (m.get("has_video") or m.get("is_image")):
             return None
 
-        def make():
-            from . import engine
-            try:
-                pb = engine.thumbnail(m, None if m.get("is_image") else c.get("inpoint", 0) + 0.05, 96)
-            except Exception:       # noqa: BLE001
-                pb = None
+        def made(pb):
             self.thumbs[key] = pb
             self.area.queue_draw()
-            return False
-        GLib.idle_add(make)
+        from . import engine
+        # on a worker thread: hundreds of clips no longer hold the window while their pictures
+        # are made (R9-37)
+        engine.thumbnail_async(m, None if m.get("is_image") else c.get("inpoint", 0) + 0.05, 96, made)
         return None
 
     def _wave(self, c):
@@ -373,7 +370,8 @@ class Timeline(Gtk.Box):
         if x1 < HEAD or x0 > W:
             return
         r, g, b = COLORS[track]
-        missing = c["kind"] == "media" and self.project.media_by_uri(c["media"]) is None
+        missing = c["kind"] == "media" and (self.project.media_by_uri(c["media"]) is None
+                                            or c["media"] in self.project.missing)
         if missing:
             r, g, b = 0.6, 0.2, 0.2
         cr.save()
@@ -403,6 +401,8 @@ class Timeline(Gtk.Box):
         if c["kind"] == "media" and not missing and (track in ("audio", "music") or h > 40):
             self._draw_wave(cr, c, x0, x1, y + (h / 2 if track == "video" else 0), h / 2 if track == "video" else h)
         label = c["name"]
+        if missing:
+            label += "  (file missing)"
         if c.get("speed", 1.0) != 1.0:
             label += "  %g×" % c["speed"]
         if c.get("muted"):
@@ -702,7 +702,12 @@ class Timeline(Gtk.Box):
                 if d["kind"] == "move":
                     track, start = d["to"]
                     gid = None if solo else self.project.group_of(d["id"])
-                    if gid:
+                    sel = [i for i in self.selected if self.project.clip(i) is not None]
+                    alone = set(self.project.expand_groups([d["id"]]))
+                    if not solo and d["id"] in sel and set(self.project.expand_groups(sel)) - alone:
+                        # several clips are selected: they go together, keeping their spacing (R9-26)
+                        self.project.move_many(sel, start - d["start"])
+                    elif gid:
                         self.project.move_group(gid, start - d["start"])
                     else:
                         self.project.move(d["id"], start, track=track, solo=True)
